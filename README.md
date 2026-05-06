@@ -1,6 +1,6 @@
 # patchwork
 
-**AST-aware code refactoring in your terminal.**
+**AST-native sed — find, replace, delete, and insert code by structure, not regex.**
 
 ```bash
 # Rename a method across files without false positives
@@ -14,15 +14,16 @@ patchwork insert-before -p 'logger.debug($msg)' --code 'tracing.debug($msg)' src
 patchwork find -p 'return null;' src/
 ```
 
+More examples are available in the [examples](examples/README.md) directory.
+
 ## The problem
 
 You want to rename a function, swap an import, or update an API call across a codebase. Your options:
 
 - **`sed`** — the regex might match inside strings or comments, misses multi-line patterns, and breaks on nested brackets. Gets fragile fast.
 - **`semgrep`** — a 200MB+ Python install, designed for CI linting, not for piping through `find | xargs`.
-- **`fastedit`** — optimized for AI coding agents (MCP server), uses a 1.7B model for complex edits, operates at the `function` level.
 
-**patchwork** is a single 3MB binary. It parses both your pattern and source code into tree-sitter CSTs (concrete syntax trees), finds structural matches, and applies edits. No models, no config, no 200MB dependency tree.
+**patchwork** is a single 3MB binary that parses both your pattern and source into tree-sitter CSTs, finds structural matches, and applies edits. No models, no config, no Python runtime.
 
 ## How it works
 
@@ -118,4 +119,4 @@ Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate depend
 
 ## Status
 
-63 tests, one binary, zero config. Early but functional.
+Single 3MB binary, zero dependencies, zero configuration. Works with pipes, files, and shell globs.
