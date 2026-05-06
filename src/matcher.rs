@@ -150,8 +150,11 @@ fn structurally_matches(
         }
         let matched_count = source_named - fixed;
 
-        // For "+", need at least one match
+        // Check repetition bounds
         if rep.op == "+" && matched_count == 0 {
+            return false;
+        }
+        if rep.op == "?" && matched_count > 1 {
             return false;
         }
 
@@ -404,6 +407,7 @@ fn preprocess_snippet(
                     let op = match chars.next() {
                         Some((_, '*')) => "*".to_string(),
                         Some((_, '+')) => "+".to_string(),
+                        Some((_, '?')) => "?".to_string(),
                         _ => {
                             // Invalid repetition syntax — treat as literal
                             result.push_str("$(");
@@ -484,7 +488,8 @@ fn preprocess_snippet(
 /// value at that position.
 ///
 /// Use `$($name)sep*` / `$($name)sep+` (Rust macro repetition syntax)
-/// for zero-or-more / one-or-more matching in the last child position.
+/// for zero-or-more (`*`), one-or-more (`+`), or optional (`?`) matching
+/// in the last child position.
 pub fn find_snippet_matches(
     source: &str,
     snippet: &str,
@@ -980,5 +985,33 @@ class A {
             find_snippet_matches(source, "users.$method($($arg,)*);", &java_lang()).unwrap();
         // Should match all three: users.size(), users.get(id), users.remove(id)
         assert_eq!(matches.len(), 3, "should match all three forms");
+    }
+
+    // ——— optional repetition (?) ———
+
+    #[test]
+    fn test_repetition_optional_matches_zero() {
+        // $f($($arg,)?) should match f() (zero args)
+        let source = "class A { void m() { f(); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)?);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("arg").map(|s| s.as_str()), Some(""));
+    }
+
+    #[test]
+    fn test_repetition_optional_matches_one() {
+        // $f($($arg,)?) should match f(x) (one arg)
+        let source = "class A { void m() { f(x); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)?);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("arg").map(|s| s.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn test_repetition_optional_rejects_two() {
+        // $f($($arg,)?) should NOT match f(x, y) (two args)
+        let source = "class A { void m() { f(x, y); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)?);", &java_lang()).unwrap();
+        assert!(matches.is_empty());
     }
 }
