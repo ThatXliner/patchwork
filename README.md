@@ -113,7 +113,6 @@ Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate depend
 ## Limitations
 
 - **Single-file only** — no cross-file rename tracking or import updates
-- **No AST rewriting** — edits are text-level (replace byte range). The AST is used for matching, not for generating diffs
 - **Formatting** — replacement text isn't auto-indented; include your own whitespace
 - **No model** — this is by design. Complex structural changes that need reasoning aren't supported. For those, use an LLM-based tool
 
