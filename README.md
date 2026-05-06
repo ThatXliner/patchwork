@@ -36,9 +36,7 @@ You want to rename a function, swap an import, or update an API call across a co
 
 ## How it compares
 
-Let's be honest: patchwork is essentially a minimal subset of [ast-grep](https://github.com/ast-grep/ast-grep). Both use tree-sitter to parse code into ASTs, both match patterns structurally, both rewrite in-place. ast-grep came first, supports 25+ languages, has a YAML rule system, VS Code extension, LSP, MCP server, interactive mode, playground, pre-commit hooks, Node/Python bindings, and 174+ releases. patchwork is a few months old, supports 5 languages, and does one thing: CLI find/replace/delete/insert with a sed-like interface.
-
-Does that mean patchwork is pointless?
+[ast-grep](https://github.com/ast-grep/ast-grep) is more mature, supports more languages, has YAML rules, LSP, VS Code extension, MCP server, playground, pre-commit hooks, language bindings — the works. patchwork doesn't try to catch up on that axis. They go by different design philosophies.
 
 | Tool | Language | Parsing | Size | Languages | Maturity |
 |---|---|---|---|---|---|
@@ -47,41 +45,9 @@ Does that mean patchwork is pointless?
 | [Comby](https://comby.dev) | OCaml | parser-free | ~8MB | ~all | Mature |
 | [Semgrep](https://github.com/semgrep/semgrep) | Python | real parsers | 200MB+ | 20+ | Mature — enterprise security product |
 
-### Honest comparison with ast-grep
+**patchwork is built for scripts.** Default output is intentionally boring (just `file:line:col`) because it's trivial to `cut`, `xargs`, or pipe into other tools. No config files, no YAML, no rule system — five flat commands with sed-like flags. If the only thing between your `find` and your edit is a tool that needs a config file, you reach for something else.
 
-**What ast-grep has that patchwork doesn't:**
-- 25+ languages vs 5
-- YAML rule system (composable `inside`/`has`/`follows`/`precedes`/`not`/`any`/`all` rules)
-- `transform` system (regex substitution, case conversion, substring slicing on captured vars)
-- `FixConfig` for clean list-item deletion (expand start/end to remove surrounding commas)
-- VS Code extension, interactive mode, `ast-grep scan` for project-wide linting
-- LSP server (go-to-definition, hover, diagnostics via structural rules)
-- MCP server (Claude Code, Cursor, and other AI tools can drive ast-grep directly)
-- Node.js and Python bindings
-- Pre-commit hook support
-- Online playground, Codemod Studio
-- Stricter matching control: `strictness` levels (`cst`, `smart`, `ast`, `relaxed`, `signature`)
-- Same-name `$VAR` backreferences (`$A == $A` matches `a == a` but not `a == b`)
-- `$$VAR` for unnamed/anonymous node capture
-- Non-capturing variables (`$_VAR`) for performance
-
-**What patchwork has that ast-grep doesn't:**
-- The `$($name)sep*` / `$($name)sep+` / `$($name)sep?` Rust-style repetition syntax (ast-grep uses `$$$NAME` which doesn't capture the separator) — this is genuinely novel
-- `$$$name` multi-node repetition at any position (ast-grep compatible)
-- Special tokens: `$BODY` (statement-aware block matching), `$STMT` (any statement), `$EXPR` (any expression)
-- A dedicated `insert-before` / `insert-after` command — useful for wrapping or logging instrumentation
-- Slightly smaller binary (~3MB vs ~10MB)
-- No config files, no YAML, no subcommands beyond the 5 operations — just `patchwork find|replace|delete|insert-before|insert-after`
-- `$lowercase` placeholder convention (some prefer this; it's a minor stylistic difference from ast-grep's `$UPPERCASE`)
-
-**What both have:**
-- tree-sitter-based AST matching
-- `$name` single-node wildcards
-- Multi-node repetition (patchwork: `$($name)sep*`, ast-grep: `$$$NAME`)
-- Tree-sitter query mode (`-q` in patchwork, `--query` in ast-grep)
-- `-i` in-place editing
-- Pipe/stdin support
-- CLI-focused design (both are fast Rust binaries)
+**patchwork aims for more expressive matching.** The `$($name)sep*` repetition syntax (Rust-style, separator-aware) is the first step. We have `$BODY`/`$STMT`/`$EXPR` special tokens, a dedicated `insert-before`/`insert-after` command, and more matching logic planned — things that go beyond what a YAML rule system enables.
 
 ### So why does patchwork exist?
 
