@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use tree_sitter::{Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, TreeCursor};
 
 #[derive(Debug, Clone)]
@@ -14,8 +15,6 @@ fn is_root_wrapper(kind: &str) -> bool {
 }
 
 /// Extract the meaningful pattern node from a parsed snippet tree.
-/// Skips the root wrapper (program/module) if the snippet is a single
-/// top-level construct.
 fn extract_pattern(root: Node) -> Option<Node> {
     if is_root_wrapper(root.kind()) && root.named_child_count() == 1 {
         root.named_child(0)
@@ -43,13 +42,39 @@ fn has_error(node: Node) -> bool {
     false
 }
 
+/// Check if a named leaf node matches by text content.
+/// Named leaf nodes require exact text match by default.
+fn leaf_matches(source_text: &str, pattern_text: &str, s_node: Node, p_node: Node) -> bool {
+    let p = &pattern_text[p_node.start_byte()..p_node.end_byte()];
+    let s = &source_text[s_node.start_byte()..s_node.end_byte()];
+    p == s
+}
+
+/// Check if a pattern node is a `$` placeholder (a bare `_pw_N` identifier).
+fn is_placeholder(pattern_node: Node, pattern_text: &str) -> bool {
+    if !pattern_node.is_named() || pattern_node.named_child_count() != 0 {
+        return false;
+    }
+    let text = &pattern_text[pattern_node.start_byte()..pattern_node.end_byte()];
+    text.starts_with("_pw_")
+}
+
 /// Check if two nodes are structurally equivalent.
 ///
-/// Two nodes match if they have the same kind and each named child
-/// recursively matches. Leaf values (identifiers, literals) are compared
-/// by kind only, not by text content — any `string_literal` matches any
-/// other `string_literal`.
-pub fn structurally_matches(source_node: Node, pattern_node: Node) -> bool {
+/// Named leaf nodes (identifiers, literals) match by text content by
+/// default. Use `$name` in snippet patterns to match any single node
+/// at that position.
+pub fn structurally_matches(
+    source_node: Node,
+    pattern_node: Node,
+    source_text: &str,
+    pattern_text: &str,
+) -> bool {
+    // A $ placeholder matches any single source node (any kind, any text)
+    if is_placeholder(pattern_node, pattern_text) {
+        return true;
+    }
+
     if source_node.kind() != pattern_node.kind() {
         return false;
     }
@@ -61,8 +86,11 @@ pub fn structurally_matches(source_node: Node, pattern_node: Node) -> bool {
         return false;
     }
 
-    // Both are leaves and kinds already match
+    // Both are named leaves — compare text
     if pattern_named == 0 {
+        if pattern_node.is_named() {
+            return leaf_matches(source_text, pattern_text, source_node, pattern_node);
+        }
         return true;
     }
 
@@ -74,7 +102,7 @@ pub fn structurally_matches(source_node: Node, pattern_node: Node) -> bool {
         let Some(s_child) = source_node.named_child(i as u32) else {
             return false;
         };
-        if !structurally_matches(s_child, p_child) {
+        if !structurally_matches(s_child, p_child, source_text, pattern_text) {
             return false;
         }
     }
@@ -83,9 +111,15 @@ pub fn structurally_matches(source_node: Node, pattern_node: Node) -> bool {
 }
 
 /// Recursively traverse source tree collecting structural matches.
-fn collect_matches(cursor: &mut TreeCursor, pattern: Node, matches: &mut Vec<Match>) {
+fn collect_matches(
+    cursor: &mut TreeCursor,
+    pattern: Node,
+    matches: &mut Vec<Match>,
+    source_text: &str,
+    pattern_text: &str,
+) {
     let node = cursor.node();
-    if structurally_matches(node, pattern) {
+    if structurally_matches(node, pattern, source_text, pattern_text) {
         matches.push(Match {
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
@@ -96,7 +130,7 @@ fn collect_matches(cursor: &mut TreeCursor, pattern: Node, matches: &mut Vec<Mat
 
     if cursor.goto_first_child() {
         loop {
-            collect_matches(cursor, pattern, matches);
+            collect_matches(cursor, pattern, matches, source_text, pattern_text);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -105,19 +139,67 @@ fn collect_matches(cursor: &mut TreeCursor, pattern: Node, matches: &mut Vec<Mat
     }
 }
 
+/// Preprocess a snippet, replacing `$name` placeholders with unique
+/// sentinel identifiers so tree-sitter can parse them.
+///
+/// Returns the processed snippet text and a map of placeholder names.
+/// `$foo` → `_pw_1` at all occurrences (same name → same sentinel).
+fn preprocess_snippet(snippet: &str) -> (String, HashMap<String, String>) {
+    let mut result = String::with_capacity(snippet.len());
+    let mut placeholders: HashMap<String, String> = HashMap::new();
+    let mut counter = 0usize;
+    let mut chars = snippet.char_indices().peekable();
+
+    while let Some((_, c)) = chars.next() {
+        if c == '$' {
+            if let Some(&(_, next)) = chars.peek() {
+                if next.is_ascii_alphabetic() || next == '_' {
+                    let mut name = String::new();
+                    while let Some(&(_, c)) = chars.peek() {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            name.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(existing) = placeholders.get(&name) {
+                        result.push_str(existing);
+                    } else {
+                        counter += 1;
+                        let sentinel = format!("_pw_{}", counter);
+                        placeholders.insert(name, sentinel.clone());
+                        result.push_str(&sentinel);
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+    }
+
+    (result, placeholders)
+}
+
 /// Find all snippet matches in source text.
+///
+/// Named nodes (identifiers, literals) are matched by text content by
+/// default. Prefix an identifier with `$` (e.g. `$x`) to match any
+/// value at that position.
 pub fn find_snippet_matches(
     source: &str,
     snippet: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
+    let (pattern_text, _placeholders) = preprocess_snippet(snippet);
+
     let mut parser = Parser::new();
     parser
         .set_language(lang)
         .map_err(|e| format!("Failed to set language: {}", e))?;
 
     let snippet_tree = parser
-        .parse(snippet, None)
+        .parse(&pattern_text, None)
         .ok_or("Failed to parse snippet")?;
     let pattern =
         extract_pattern(snippet_tree.root_node()).ok_or("Could not extract pattern from snippet")?;
@@ -132,7 +214,7 @@ pub fn find_snippet_matches(
 
     let mut matches = Vec::new();
     let mut cursor = source_tree.root_node().walk();
-    collect_matches(&mut cursor, pattern, &mut matches);
+    collect_matches(&mut cursor, pattern, &mut matches, source, &pattern_text);
     Ok(matches)
 }
 
@@ -142,13 +224,9 @@ pub fn find_query_matches(
     query_str: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let query =
-        Query::new(lang, query_str).map_err(|e| {
-            format!(
-                "Query error at {}:{}: {}",
-                e.row, e.column, e.message
-            )
-        })?;
+    let query = Query::new(lang, query_str).map_err(|e| {
+        format!("Query error at {}:{}: {}", e.row, e.column, e.message)
+    })?;
 
     let mut parser = Parser::new();
     parser
@@ -169,7 +247,6 @@ pub fn find_query_matches(
             continue;
         }
 
-        // Prefer @matched or @target capture; fall back to first capture
         let target = qm
             .captures
             .iter()
@@ -209,7 +286,82 @@ mod tests {
         tree_sitter_javascript::LANGUAGE.into()
     }
 
-    // ——— snippet matching ———
+    // ——— by default, leaf nodes match by name ———
+
+    #[test]
+    fn test_exact_name_match() {
+        // Identifiers must match exactly by default
+        let source = "class A { void f() { x = 1; } }";
+        let matches = find_snippet_matches(source, "x = 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_identifier_name_mismatch() {
+        // Different identifier name, no match
+        let source = "class A { void f() { y = 1; } }";
+        let matches = find_snippet_matches(source, "x = 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_literal_value_mismatch() {
+        // Different integer value, no match
+        let source = "class A { void f() { return 42; } }";
+        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_string_literal_mismatch() {
+        let source = "class A { void f() { s = \"hello\"; } }";
+        let matches = find_snippet_matches(source, "s = \"world\";", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 0);
+    }
+
+    // ——— $ placeholder wildcard matching ———
+
+    #[test]
+    fn test_dollar_placeholder_matches_any_identifier() {
+        let source = "class A { void f() { println(42); } }";
+        let matches = find_snippet_matches(source, "$method(42);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_dollar_placeholder_matches_any_literal() {
+        let source = "class A { void f() { return 42; } }";
+        let matches = find_snippet_matches(source, "return $n;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_dollar_placeholder_matches_any_string() {
+        let source = "class A { void f() { s = \"hello\"; } }";
+        let matches = find_snippet_matches(source, "s = $s;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_dollar_multiple_placeholders() {
+        let source = "class A { void f() { foo(1, 2); } }";
+        let matches = find_snippet_matches(source, "$f($a, $b);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_matches_with_placeholder() {
+        let source = r#"
+class A {
+    void f() { return 1; }
+    void g() { return 2; }
+    void h() { return 3; }
+}"#;
+        let matches = find_snippet_matches(source, "return $n;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 3);
+    }
+
+    // ——— existing test cases adapted for name-matched default ———
 
     #[test]
     fn test_same_kind_leaves_match() {
@@ -219,15 +371,8 @@ mod tests {
     }
 
     #[test]
-    fn test_leaf_value_ignored() {
-        let source = "class A { void f() { return 42; } }";
-        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
-        assert_eq!(matches.len(), 1);
-    }
-
-    #[test]
     fn test_different_structure_no_match() {
-        let source = "class A { void f() { if (a) {} } }";
+        let source = "class A { void f() { if (true) {} } }";
         let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
         assert!(matches.is_empty());
     }
@@ -242,8 +387,8 @@ class A {
     }
 }"#;
         let matches =
-            find_snippet_matches(source, r#"System.out.println("...");"#, &java_lang()).unwrap();
-        assert_eq!(matches.len(), 2);
+            find_snippet_matches(source, r#"System.out.println("hello");"#, &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
     }
 
     #[test]
@@ -258,24 +403,6 @@ class A {
     fn test_empty_source_no_match() {
         let matches = find_snippet_matches("", "return 1;", &java_lang()).unwrap();
         assert!(matches.is_empty());
-    }
-
-    #[test]
-    fn test_multiple_matches() {
-        let source = r#"
-class A {
-    void f() { return 1; }
-    void g() { return 2; }
-    void h() { return 3; }
-}"#;
-        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
-        assert_eq!(matches.len(), 3);
-    }
-
-    #[test]
-    fn test_snippet_error_returns_err() {
-        let result = find_snippet_matches("class A {}", "return ", &java_lang());
-        assert!(result.is_err());
     }
 
     #[test]
@@ -300,8 +427,13 @@ class Outer {
         let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
         assert_eq!(matches.len(), 1);
         let m = &matches[0];
-        let matched_text = &source[m.start_byte..m.end_byte];
-        assert_eq!(matched_text, "return 1;");
+        assert_eq!(&source[m.start_byte..m.end_byte], "return 1;");
+    }
+
+    #[test]
+    fn test_snippet_error_returns_err() {
+        let result = find_snippet_matches("class A {}", "return ", &java_lang());
+        assert!(result.is_err());
     }
 
     // ——— Python snippet matching ———
@@ -309,17 +441,14 @@ class Outer {
     #[test]
     fn test_python_snippet_match() {
         let source = "x = 42\n";
-        let matches = find_snippet_matches(source, "x = 1", &python_lang()).unwrap();
+        let matches = find_snippet_matches(source, "x = 42", &python_lang()).unwrap();
         assert_eq!(matches.len(), 1);
-        // The match may include trailing newline; check it starts correctly
-        assert!(matches[0].end_byte >= 6);
-        assert!(source[matches[0].start_byte..].starts_with("x = 42"));
     }
 
     #[test]
     fn test_python_multiple_matches() {
         let source = "a = 1\nb = 2\n";
-        let matches = find_snippet_matches(source, "a = 1", &python_lang()).unwrap();
+        let matches = find_snippet_matches(source, "$x = $n", &python_lang()).unwrap();
         assert_eq!(matches.len(), 2);
     }
 
@@ -335,7 +464,7 @@ class Outer {
     #[test]
     fn test_js_snippet_match() {
         let source = "function f() { return 42; }";
-        let matches = find_snippet_matches(source, "return 1;", &js_lang()).unwrap();
+        let matches = find_snippet_matches(source, "return 42;", &js_lang()).unwrap();
         assert_eq!(matches.len(), 1);
     }
 
@@ -367,7 +496,6 @@ class Outer {
     #[test]
     fn test_query_prefers_matched_capture() {
         let source = "class A { void f() { return 42; } }";
-        // Query captures a method_declaration's identifier — should use @matched
         let matches = find_query_matches(
             source,
             "(method_declaration name: (identifier) @matched)",
@@ -396,9 +524,22 @@ class Outer {
 
     #[test]
     fn test_structurally_matches_fails_on_kind_mismatch() {
-        // An if-statement doesn't match a return statement
         let source = "class A { void f() { return 1; } }";
         let matches = find_snippet_matches(source, "if (true) {}", &java_lang()).unwrap();
         assert!(matches.is_empty());
+    }
+
+    // ——— preprocess_snippet ———
+
+    #[test]
+    fn test_preprocess_replaces_dollar() {
+        let (text, _) = preprocess_snippet("$x = $y;");
+        assert_eq!(text, "_pw_1 = _pw_2;");
+    }
+
+    #[test]
+    fn test_preprocess_no_dollar() {
+        let (text, _) = preprocess_snippet("x = y;");
+        assert_eq!(text, "x = y;");
     }
 }

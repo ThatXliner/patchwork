@@ -41,7 +41,7 @@ fn test_find_stdin_java() {
 
 #[test]
 fn test_find_stdin_python() {
-    let out = run_pipe(&["find", "-l", "python", "-p", "x = 1"], "x = 42\n").unwrap();
+    let out = run_pipe(&["find", "-l", "python", "-p", "x = 42"], "x = 42\n").unwrap();
     assert!(out.contains("x = 42"));
 }
 

@@ -1,16 +1,16 @@
 # patchwork
 
-**Structural code editing with tree-sitter — like `sed` but it understands syntax.**
+**AST-aware code editing with tree-sitter — like `sed` but it understands syntax.**
 
 ```bash
 # Match by structure, not regex
 patchwork find -p 'return null;' src/
 
-# Replace structurally equivalent code
-patchwork replace -i -p 'old_func(a, b)' -r 'new_func(b, a)' src/*.java
+# Replace matched code
+patchwork replace -i -p 'old_func($a, $b)' -r 'new_func($b, $a)' src/*.java
 
 # Delete matched expressions
-patchwork delete -i -p 'debug(message)' app.py
+patchwork delete -i -p 'debug($msg)' app.py
 
 # Insert relative to structural matches
 patchwork insert-after -p 'System.out.println("done");' --code '\nlogger.info("complete");' App.java
@@ -23,24 +23,36 @@ patchwork find -q '(function_definition name: (identifier) @name)' src/*.py
 
 - **`sed`/`grep`** are line-based and break on multi-line statements, nested brackets, or string literals containing your pattern.
 - **`semgrep`** is a 200MB+ Python dependency designed for CI scans, not ad-hoc CLI piping.
-- **`fastedit`** is built for AI agents as an MCP server — it uses a 1.7B model for non-trivial edits and operates at the symbol level, not arbitrary nodes.
+- **`fastedit`** is built for AI agents as an MCP server — it uses a 1.7B model for non-trivial edits.
 
-**patchwork** is a single deterministic binary. It parses both your pattern and source code into tree-sitter CSTs (concrete syntax trees), then finds structural matches and applies edits. No model calls, no configuration files, no magic.
+**patchwork** is a single deterministic binary. It parses both your pattern and source code into tree-sitter CSTs, then finds structural matches and applies edits. No model calls, no configuration files, no magic.
 
 ## How it works
 
-There are two matching modes:
+Write the code as a snippet (`-p`). It gets parsed into an AST subtree and matched against the source.
 
-### Snippet matching (`-p`)
-
-Write the code you're looking for. It gets parsed into an AST subtree and matched structurally against the source — same tree shape, same node kinds, but leaf values (identifiers, literals) match by type only. `return 1;` matches `return 42;` because the structure (`return_statement → integer_literal`) is identical.
+**Names and values match exactly by default.** `return 1;` only matches `return 1;`, not `return 42;`. Use `$` prefix (like `$x`) to match any value at that position:
 
 ```bash
-# Matches any return with an integer literal
-patchwork find -p 'return 1;' file.java
+# Match specific return value
+patchwork find -p 'return null;' src/
+
+# Match any return value
+patchwork find -p 'return $val;' src/
 ```
 
-For name-aware matching, use tree-sitter queries. Snippet matching is purely structural — `old_func(a, b)` matches any two-argument call at that position.
+`$name` acts as a placeholder that matches any single AST node of any type — identifiers, literals, expressions.
+
+```bash
+# Match any call to any method with value 42
+patchwork replace -i -p 'println(42)' -r 'log(42)' src/*.java
+
+# Match any call to println with any argument
+patchwork replace -i -p 'println($arg)' -r 'log($arg)' src/*.java
+
+# Match any method call with any args
+patchwork delete -i -p '$method($args)' App.java
+```
 
 ### Tree-sitter queries (`-q`)
 
@@ -69,11 +81,11 @@ Java, Python, JavaScript, TypeScript, and TSX — covered by `tree-sitter-java`,
 ## Usage
 
 ```bash
-# Pipe mode (auto-detection requires --language)
+# Pipe mode (requires --language with stdin)
 cat Main.java | patchwork find -l java -p 'return null;'
 
 # File mode (language detected from extension)
-patchwork replace -i -p 'catch (Exception e)' -r 'catch (Exception e) { log(e); throw; }' src/*.java
+patchwork replace -i -p 'catch (Exception $e)' -r 'catch (Exception $e) { log($e); throw; }' src/*.java
 
 # Query mode
 patchwork find -q '(method_invocation name: (identifier) @name (#eq? @name "println"))' App.java
@@ -104,4 +116,4 @@ Patchwork is a CLI tool designed for **you**, not an agent. It matches arbitrary
 
 ## Status
 
-Early but functional. 14 tests, one binary, zero config.
+Early but functional. 63 tests, one binary, zero config.
