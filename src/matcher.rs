@@ -15,11 +15,21 @@ pub struct Match {
     pub captures: HashMap<String, String>,
 }
 
-/// Metadata about a `$($name)sep*` repetition placeholder.
+/// Distinguishes repetition syntax styles.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RepetitionKind {
+    /// `$($name)sep*` — only applies at the last child position
+    LastChild,
+    /// `$$$name` or `$$$` — can span multiple consecutive children at any position
+    MultiChild,
+}
+
+/// Metadata about a `$($name)sep*` or `$$$name` repetition placeholder.
 #[derive(Debug, Clone)]
 pub(crate) struct RepetitionInfo {
-    /// Repetition operator: "*" or "+"
+    /// Repetition operator: "*", "+", or "?"
     op: String,
+    pub(crate) kind: RepetitionKind,
 }
 
 fn is_root_wrapper(kind: &str) -> bool {
@@ -96,9 +106,12 @@ fn last_child_repetition(
         return None;
     }
     let sentinel = pattern_text[last.start_byte()..last.end_byte()].to_string();
-    repetitions
-        .get(&sentinel)
-        .map(|info| (sentinel, info.clone()))
+    match repetitions.get(&sentinel) {
+        Some(info) if info.kind == RepetitionKind::LastChild => {
+            Some((sentinel, info.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// Check if two nodes are structurally equivalent.
@@ -194,41 +207,197 @@ fn structurally_matches(
         return true;
     }
 
-    // No repetition — exact child count match
-    if pattern_named != source_named {
+    // Check for multi-child placeholders before enforcing exact child count.
+    // $$$name can consume 0+ source children, so child counts may differ.
+    // A wrapper like `expression_statement` → `$$$body` counts via
+    // wraps_multi_placeholder, but only when it's the sole named child
+    // (otherwise argument_list wrapping $$$args would trigger at the wrong level).
+    let p_children = named_children(pattern_node);
+    let has_multi = p_children
+        .iter()
+        .any(|c| is_multi_placeholder(*c, pattern_text, repetitions));
+
+    if !has_multi {
+        // No multi-child placeholder — exact child count match required
+        if pattern_named != source_named {
+            return false;
+        }
+
+        // Both are named leaves — compare text
+        if pattern_named == 0 {
+            if pattern_node.is_named() {
+                return leaf_matches(source_text, pattern_text, source_node, pattern_node);
+            }
+            return true;
+        }
+    }
+
+    // Compare named children — use backtracking for multi-child placeholders
+    let s_children = named_children(source_node);
+    let p_children = named_children(pattern_node);
+
+    match_children_suffix(
+        &s_children,
+        &p_children,
+        0,
+        0,
+        source_text,
+        pattern_text,
+        captures,
+        reverse_placeholders,
+        repetitions,
+    )
+}
+
+/// Check if a pattern node is a multi-child placeholder (`$$$name` or `$$$`).
+/// Only matches leaf nodes. For statement-level repetition (where tree-sitter
+/// wraps the sentinel in `expression_statement`), use `$($name)*` instead.
+fn is_multi_placeholder(
+    node: Node,
+    pattern_text: &str,
+    repetitions: &HashMap<String, RepetitionInfo>,
+) -> bool {
+    if !node.is_named() || node.named_child_count() != 0 {
+        return false;
+    }
+    let text = &pattern_text[node.start_byte()..node.end_byte()];
+    matches!(repetitions.get(text), Some(info) if info.kind == RepetitionKind::MultiChild)
+}
+
+/// Recursively match a child pattern node against a single source node.
+/// Thin wrapper that delegates to `structurally_matches`.
+fn match_single_child(
+    s_child: Node,
+    p_child: Node,
+    source_text: &str,
+    pattern_text: &str,
+    captures: &mut HashMap<String, String>,
+    reverse_placeholders: &HashMap<String, String>,
+    repetitions: &HashMap<String, RepetitionInfo>,
+) -> bool {
+    structurally_matches(
+        s_child,
+        p_child,
+        source_text,
+        pattern_text,
+        captures,
+        reverse_placeholders,
+        repetitions,
+    )
+}
+
+/// Match a suffix of pattern children against a suffix of source children,
+/// handling `$$$name` multi-child placeholders with backtracking.
+///
+/// Returns true if the remaining children match. On success, `captures`
+/// includes placeholders from the matched suffix.
+fn match_children_suffix(
+    s_children: &[Node<'_>],
+    p_children: &[Node<'_>],
+    si: usize,
+    pi: usize,
+    source_text: &str,
+    pattern_text: &str,
+    captures: &mut HashMap<String, String>,
+    reverse_placeholders: &HashMap<String, String>,
+    repetitions: &HashMap<String, RepetitionInfo>,
+) -> bool {
+    if pi >= p_children.len() {
+        // No more pattern children — all source children must be consumed
+        return si >= s_children.len();
+    }
+
+    let p_child = p_children[pi];
+
+    if is_multi_placeholder(p_child, pattern_text, repetitions) {
+        let sentinel =
+            pattern_text[p_child.start_byte()..p_child.end_byte()].to_string();
+        let rep = repetitions.get(&sentinel).unwrap();
+        // Determine min/max source children this placeholder can consume
+        let min = if rep.op == "+" { 1 } else { 0 };
+        let max = match rep.op.as_str() {
+            "?" => 1,
+            _ => s_children.len().saturating_sub(si).saturating_sub(
+                p_children.len().saturating_sub(pi + 1),
+            ),
+        };
+
+        for n in min..=max {
+            let saved = captures.clone();
+            let end = si + n;
+
+            // Capture spanned text for named placeholders
+            if let Some(name) = reverse_placeholders.get(&sentinel) {
+                if n > 0 {
+                    let first = s_children[si];
+                    let last = s_children[end - 1];
+                    let text = &source_text[first.start_byte()..last.end_byte()];
+                    captures.insert(name.clone(), text.to_string());
+                } else {
+                    captures.insert(name.clone(), String::new());
+                }
+            }
+
+            if match_children_suffix(
+                s_children,
+                p_children,
+                end,
+                pi + 1,
+                source_text,
+                pattern_text,
+                captures,
+                reverse_placeholders,
+                repetitions,
+            ) {
+                return true;
+            }
+
+            // Backtrack
+            *captures = saved;
+        }
+
         return false;
     }
 
-    // Both are named leaves — compare text
-    if pattern_named == 0 {
-        if pattern_node.is_named() {
-            return leaf_matches(source_text, pattern_text, source_node, pattern_node);
-        }
-        return true;
+    // Regular (non-multi) pattern child — must match exactly one source child
+    if si >= s_children.len() {
+        return false;
     }
 
-    // Compare named children in order
-    for i in 0..pattern_named {
-        let Some(p_child) = pattern_node.named_child(i as u32) else {
-            return false;
-        };
-        let Some(s_child) = source_node.named_child(i as u32) else {
-            return false;
-        };
-        if !structurally_matches(
-            s_child,
-            p_child,
-            source_text,
-            pattern_text,
-            captures,
-            reverse_placeholders,
-            repetitions,
-        ) {
-            return false;
-        }
+    if !match_single_child(
+        s_children[si],
+        p_child,
+        source_text,
+        pattern_text,
+        captures,
+        reverse_placeholders,
+        repetitions,
+    ) {
+        return false;
     }
 
-    true
+    match_children_suffix(
+        s_children,
+        p_children,
+        si + 1,
+        pi + 1,
+        source_text,
+        pattern_text,
+        captures,
+        reverse_placeholders,
+        repetitions,
+    )
+}
+
+/// Collect named children of `node` into a vector.
+fn named_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
+    let mut result = Vec::new();
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i as u32) {
+            result.push(child);
+        }
+    }
+    result
 }
 
 /// If `pattern` is a single-child wrapper node (like `expression_statement`
@@ -444,15 +613,54 @@ fn preprocess_snippet(
 
                     if let Some(existing) = placeholders.get(&name) {
                         result.push_str(existing);
-                        repetitions.insert(existing.clone(), RepetitionInfo { op });
+                        repetitions.insert(existing.clone(), RepetitionInfo {
+                            op,
+                            kind: RepetitionKind::LastChild,
+                        });
                     } else {
                         counter += 1;
                         let sentinel = format!("_pw_{}", counter);
                         placeholders.insert(name, sentinel.clone());
-                        repetitions.insert(sentinel.clone(), RepetitionInfo { op });
+                        repetitions.insert(sentinel.clone(), RepetitionInfo {
+                            op,
+                            kind: RepetitionKind::LastChild,
+                        });
                         result.push_str(&sentinel);
                     }
                     continue;
+                } else if next == '$' {
+                    // Check for $$$ — multi-child placeholder
+                    let mut lookahead = chars.clone();
+                    lookahead.next(); // consume second $
+                    if let Some(&(_, c3)) = lookahead.peek() {
+                        if c3 == '$' {
+                            // $$$ found — consume all three $ signs
+                            chars.next(); // second $
+                            chars.next(); // third $
+                            // Read optional identifier name
+                            let mut multi_name = String::new();
+                            while let Some(&(_, mc)) = chars.peek() {
+                                if mc.is_ascii_alphanumeric() || mc == '_' {
+                                    multi_name.push(mc);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            counter += 1;
+                            let sentinel = format!("_pw_multi_{}", counter);
+                            if !multi_name.is_empty() {
+                                placeholders.insert(multi_name, sentinel.clone());
+                            }
+                            repetitions.insert(sentinel.clone(), RepetitionInfo {
+                                op: "*".to_string(),
+                                kind: RepetitionKind::MultiChild,
+                            });
+                            result.push_str(&sentinel);
+                            continue;
+                        }
+                    }
+                    // Not $$$ — treat $ as literal, fall through
                 } else if next.is_ascii_alphabetic() || next == '_' {
                     let mut name = String::new();
                     while let Some(&(_, c)) = chars.peek() {
@@ -1014,4 +1222,118 @@ class A {
         let matches = find_snippet_matches(source, "$f($($arg,)?);", &java_lang()).unwrap();
         assert!(matches.is_empty());
     }
+
+    // ——— $$$ multi-child placeholder ———
+
+    #[test]
+    fn test_triple_dollar_matches_zero_args() {
+        // $$$args should match f() (zero args)
+        let source = "class A { void m() { f(); } }";
+        let matches =
+            find_snippet_matches(source, "$f($$$args);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].captures.get("args").map(|s| s.as_str()),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn test_triple_dollar_matches_one_arg() {
+        // $$$args should match f(x) (one arg)
+        let source = "class A { void m() { f(x); } }";
+        let matches =
+            find_snippet_matches(source, "$f($$$args);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].captures.get("args").map(|s| s.as_str()),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn test_triple_dollar_matches_multiple_args() {
+        // $$$args should match f(x, y, z) (multiple args)
+        let source = "class A { void m() { f(x, y, z); } }";
+        let matches =
+            find_snippet_matches(source, "$f($$$args);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let cap = matches[0].captures.get("args").unwrap();
+        assert!(cap.contains('x'), "should contain x: {}", cap);
+        assert!(cap.contains('y'), "should contain y: {}", cap);
+        assert!(cap.contains('z'), "should contain z: {}", cap);
+    }
+
+    #[test]
+    fn test_triple_dollar_unnamed() {
+        // Bare $$$ should match but not capture
+        let source = "class A { void m() { f(a, b, c); } }";
+        let matches =
+            find_snippet_matches(source, "$f($$$);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_triple_dollar_matches_any_args() {
+        // $$$args matches any number of arguments in function calls
+        let source = "class A { void m() { f(); g(x); h(a, b, c); } }";
+        // Match any method call (single-identifier name) with any args
+        let matches =
+            find_snippet_matches(source, "$fn($$$args);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 3, "should match f(), g(x), h(a,b,c)");
+    }
+
+    #[test]
+    fn test_triple_dollar_combined_with_single() {
+        // $$$ and $ work together
+        let source = "class A { void f() { log(msg); } }";
+        let matches =
+            find_snippet_matches(source, "$fn($$$args);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].captures.get("fn").map(|s| s.as_str()),
+            Some("log")
+        );
+        assert_eq!(
+            matches[0].captures.get("args").map(|s| s.as_str()),
+            Some("msg")
+        );
+    }
+
+    #[test]
+    fn test_triple_dollar_matches_all_method_calls() {
+        // $$$ matches any method name on users, $($arg,)* handles args
+        let source = r#"
+class A {
+    void f() {
+        users.size();
+        String s = users.get(id);
+        return users.remove(id);
+    }
+}"#;
+        let matches =
+            find_snippet_matches(source, "users.$$$($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 3, "should match all three forms");
+    }
+
+    #[test]
+    fn test_triple_dollar_preprocess() {
+        let (text, placeholders, reps) = preprocess_snippet("$$$args");
+        assert!(text.starts_with("_pw_multi_"), "got: {}", text);
+        assert_eq!(placeholders.get("args").map(|s| s.as_str()), Some(text.as_str()));
+        let rep = reps.get(text.as_str()).unwrap();
+        assert_eq!(rep.op, "*");
+        assert_eq!(rep.kind, RepetitionKind::MultiChild);
+    }
+
+    #[test]
+    fn test_triple_dollar_preprocess_unnamed() {
+        let (text, placeholders, reps) = preprocess_snippet("$$$");
+        assert!(text.starts_with("_pw_multi_"), "got: {}", text);
+        // No placeholder name registered for anonymous $$$
+        assert!(!placeholders.contains_key(""));
+        let rep = reps.get(text.as_str()).unwrap();
+        assert_eq!(rep.kind, RepetitionKind::MultiChild);
+    }
+
 }

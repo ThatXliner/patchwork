@@ -18,7 +18,21 @@ where
 }
 
 fn patchwork() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_patchwork"))
+    let bin = std::env::var("CARGO_BIN_EXE_patchwork-cli")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_patchwork_cli"))
+        .unwrap_or_else(|_| {
+            // Fallback: test binary is in target/debug/deps/, main binary in target/debug/
+            let mut path = std::env::current_exe()
+                .unwrap()
+                .parent()  // deps/
+                .unwrap()
+                .parent()  // target/debug/
+                .unwrap()
+                .to_path_buf();
+            path.push("patchwork-cli");
+            path.to_str().unwrap().to_string()
+        });
+    Command::new(bin)
 }
 
 fn run_pipe(args: &[&str], input: &str) -> Result<String, String> {
