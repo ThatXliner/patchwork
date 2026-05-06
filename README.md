@@ -2,6 +2,15 @@
 
 **AST-native sed — find, replace, delete, and insert code by structure, not regex.**
 
+## Installation
+
+```bash
+cargo install patchwork-cli
+```
+
+
+## Usage
+
 ```bash
 # Rename a method across files without false positives
 patchwork replace -i -p 'getOldData($a)' -r 'getData($a)' src/**/*.java
