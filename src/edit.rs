@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::matcher::Match;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Edit {
@@ -103,9 +103,9 @@ pub fn apply_edits(source: &str, edits: &[Edit]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
     use tree_sitter::Point;
-    use super::*;
 
     #[test]
     fn test_replace() {
@@ -321,10 +321,7 @@ mod tests {
         caps.insert("f".into(), "foo".into());
         caps.insert("a".into(), "1".into());
         caps.insert("b".into(), "2".into());
-        assert_eq!(
-            substitute_captures("$f($b, $a)", &caps),
-            "foo(2, 1)"
-        );
+        assert_eq!(substitute_captures("$f($b, $a)", &caps), "foo(2, 1)");
     }
 
     #[test]

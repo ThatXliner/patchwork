@@ -54,8 +54,14 @@ mod tests {
     fn test_extension_mapping() {
         assert!(matches!(Lang::from_extension("foo.java"), Some(Lang::Java)));
         assert!(matches!(Lang::from_extension("foo.py"), Some(Lang::Python)));
-        assert!(matches!(Lang::from_extension("foo.js"), Some(Lang::JavaScript)));
-        assert!(matches!(Lang::from_extension("foo.ts"), Some(Lang::TypeScript)));
+        assert!(matches!(
+            Lang::from_extension("foo.js"),
+            Some(Lang::JavaScript)
+        ));
+        assert!(matches!(
+            Lang::from_extension("foo.ts"),
+            Some(Lang::TypeScript)
+        ));
         assert!(matches!(Lang::from_extension("foo.tsx"), Some(Lang::TSX)));
         assert!(Lang::from_extension("foo.rs").is_none());
     }
@@ -72,9 +78,18 @@ mod tests {
 
     #[test]
     fn test_additional_extensions() {
-        assert!(matches!(Lang::from_extension("test.jsx"), Some(Lang::JavaScript)));
-        assert!(matches!(Lang::from_extension("test.mjs"), Some(Lang::JavaScript)));
-        assert!(matches!(Lang::from_extension("test.cjs"), Some(Lang::JavaScript)));
+        assert!(matches!(
+            Lang::from_extension("test.jsx"),
+            Some(Lang::JavaScript)
+        ));
+        assert!(matches!(
+            Lang::from_extension("test.mjs"),
+            Some(Lang::JavaScript)
+        ));
+        assert!(matches!(
+            Lang::from_extension("test.cjs"),
+            Some(Lang::JavaScript)
+        ));
     }
 
     #[test]
@@ -88,7 +103,13 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_extension() {
-        assert!(matches!(Lang::from_extension("TEST.JAVA"), Some(Lang::Java)));
-        assert!(matches!(Lang::from_extension("Test.Py"), Some(Lang::Python)));
+        assert!(matches!(
+            Lang::from_extension("TEST.JAVA"),
+            Some(Lang::Java)
+        ));
+        assert!(matches!(
+            Lang::from_extension("Test.Py"),
+            Some(Lang::Python)
+        ));
     }
 }

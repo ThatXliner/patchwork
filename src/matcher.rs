@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use tree_sitter::{Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, TreeCursor};
+use tree_sitter::{
+    Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, TreeCursor,
+};
 
 #[derive(Debug, Clone)]
 pub struct Match {
@@ -11,6 +13,13 @@ pub struct Match {
     /// Placeholder captures from snippet matching.
     /// Maps `$name` → the source text it matched.
     pub captures: HashMap<String, String>,
+}
+
+/// Metadata about a `$($name)sep*` repetition placeholder.
+#[derive(Debug, Clone)]
+pub(crate) struct RepetitionInfo {
+    /// Repetition operator: "*" or "+"
+    op: String,
 }
 
 fn is_root_wrapper(kind: &str) -> bool {
@@ -56,7 +65,10 @@ fn leaf_matches(source_text: &str, pattern_text: &str, s_node: Node, p_node: Nod
 /// Build reverse map from sentinel identifier to placeholder name.
 /// `{"msg": "_pw_1"}` → `{"_pw_1": "msg"}`
 fn reverse_placeholder_map(placeholders: &HashMap<String, String>) -> HashMap<String, String> {
-    placeholders.iter().map(|(k, v)| (v.clone(), k.clone())).collect()
+    placeholders
+        .iter()
+        .map(|(k, v)| (v.clone(), k.clone()))
+        .collect()
 }
 
 /// Check if a pattern node is a `$` placeholder (a bare `_pw_N` identifier).
@@ -68,18 +80,41 @@ fn is_placeholder(pattern_node: Node, pattern_text: &str) -> bool {
     text.starts_with("_pw_")
 }
 
+/// Check if the last named child of `parent` is a repetition placeholder.
+/// Returns `Some((sentinel, info))` if so.
+fn last_child_repetition(
+    parent: Node,
+    pattern_text: &str,
+    repetitions: &HashMap<String, RepetitionInfo>,
+) -> Option<(String, RepetitionInfo)> {
+    let count = parent.named_child_count();
+    if count == 0 {
+        return None;
+    }
+    let last = parent.named_child(count as u32 - 1)?;
+    if !is_placeholder(last, pattern_text) {
+        return None;
+    }
+    let sentinel = pattern_text[last.start_byte()..last.end_byte()].to_string();
+    repetitions
+        .get(&sentinel)
+        .map(|info| (sentinel, info.clone()))
+}
+
 /// Check if two nodes are structurally equivalent.
 ///
 /// Named leaf nodes (identifiers, literals) match by text content by
 /// default. Use `$name` in snippet patterns to match any single node
-/// at that position.
-pub fn structurally_matches(
+/// at that position. Use `$($name)sep*` / `$($name)sep+` to match
+/// zero or more / one or more repetitions as the last child.
+fn structurally_matches(
     source_node: Node,
     pattern_node: Node,
     source_text: &str,
     pattern_text: &str,
     captures: &mut HashMap<String, String>,
     reverse_placeholders: &HashMap<String, String>,
+    repetitions: &HashMap<String, RepetitionInfo>,
 ) -> bool {
     // A $ placeholder matches any single source node (any kind, any text)
     if is_placeholder(pattern_node, pattern_text) {
@@ -98,6 +133,65 @@ pub fn structurally_matches(
     let pattern_named = pattern_node.named_child_count();
     let source_named = source_node.named_child_count();
 
+    // Check if the last child of the *parent* is a repetition.
+    // We handle this at the parent level by checking whether
+    // `pattern_node` (a child of some caller) is a repetition.
+    // Actually, we need to check if the pattern_node ITSELF
+    // is the parent that has a repetition child. That happens
+    // in the child comparison loop at the caller.
+    //
+    // But the repetition applies when the PATTERN node is the one
+    // whose last child is a repetition. So we check here:
+    if let Some((sentinel, rep)) = last_child_repetition(pattern_node, pattern_text, repetitions) {
+        // Non-repetition children count = pattern_named - 1
+        let fixed = pattern_named - 1;
+        if source_named < fixed {
+            return false;
+        }
+        let matched_count = source_named - fixed;
+
+        // For "+", need at least one match
+        if rep.op == "+" && matched_count == 0 {
+            return false;
+        }
+
+        // Compare fixed children 1:1
+        for i in 0..fixed {
+            let Some(p_child) = pattern_node.named_child(i as u32) else {
+                return false;
+            };
+            let Some(s_child) = source_node.named_child(i as u32) else {
+                return false;
+            };
+            if !structurally_matches(
+                s_child,
+                p_child,
+                source_text,
+                pattern_text,
+                captures,
+                reverse_placeholders,
+                repetitions,
+            ) {
+                return false;
+            }
+        }
+
+        // Capture the repetition match
+        if matched_count > 0 {
+            if let Some(name) = reverse_placeholders.get(&sentinel) {
+                let first = source_node.named_child(fixed as u32).unwrap();
+                let last = source_node.named_child((source_named - 1) as u32).unwrap();
+                let text = &source_text[first.start_byte()..last.end_byte()];
+                captures.insert(name.clone(), text.to_string());
+            }
+        } else if let Some(name) = reverse_placeholders.get(&sentinel) {
+            captures.insert(name.clone(), String::new());
+        }
+
+        return true;
+    }
+
+    // No repetition — exact child count match
     if pattern_named != source_named {
         return false;
     }
@@ -118,12 +212,48 @@ pub fn structurally_matches(
         let Some(s_child) = source_node.named_child(i as u32) else {
             return false;
         };
-        if !structurally_matches(s_child, p_child, source_text, pattern_text, captures, reverse_placeholders) {
+        if !structurally_matches(
+            s_child,
+            p_child,
+            source_text,
+            pattern_text,
+            captures,
+            reverse_placeholders,
+            repetitions,
+        ) {
             return false;
         }
     }
 
     true
+}
+
+/// If `pattern` is a single-child wrapper node (like `expression_statement`
+/// wrapping an expression), return the inner child. This enables matching
+/// through statement boundaries.
+///
+/// Skips unwrapping when the inner child is a bare placeholder or a leaf
+/// (0 named children), both of which would match too broadly.
+fn try_unwrap_pattern<'a>(pattern: Node<'a>, pattern_text: &'a str) -> Option<Node<'a>> {
+    let count = pattern.named_child_count();
+    if count == 1 {
+        if let Some(child) = pattern.named_child(0) {
+            if child.named_child_count() > 0 && !is_placeholder(child, pattern_text) {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+/// Check if `node`'s byte range is entirely inside any match in `matches`.
+/// Used to avoid duplicate matches from statement unwrapping.
+fn overlaps_matched_range(node: Node, matches: &[Match]) -> bool {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    matches.iter().any(|m| {
+        m.start_byte <= start && end <= m.end_byte && (m.start_byte < end || start < m.end_byte)
+    })
 }
 
 /// Recursively traverse source tree collecting structural matches.
@@ -134,10 +264,21 @@ fn collect_matches(
     source_text: &str,
     pattern_text: &str,
     reverse_placeholders: &HashMap<String, String>,
+    repetitions: &HashMap<String, RepetitionInfo>,
 ) {
     let node = cursor.node();
+
+    // Try full pattern match
     let mut captures = HashMap::new();
-    if structurally_matches(node, pattern, source_text, pattern_text, &mut captures, reverse_placeholders) {
+    if structurally_matches(
+        node,
+        pattern,
+        source_text,
+        pattern_text,
+        &mut captures,
+        reverse_placeholders,
+        repetitions,
+    ) {
         matches.push(Match {
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
@@ -145,11 +286,43 @@ fn collect_matches(
             end_point: node.end_position(),
             captures,
         });
+    } else if !overlaps_matched_range(node, matches) {
+        // Try unwrapped pattern — strip statement-level wrappers
+        // to match deeper (e.g., method calls inside return_statements).
+        // Skips bare placeholders to avoid overly broad matches.
+        if let Some(inner) = try_unwrap_pattern(pattern, pattern_text) {
+            let mut captures = HashMap::new();
+            if structurally_matches(
+                node,
+                inner,
+                source_text,
+                pattern_text,
+                &mut captures,
+                reverse_placeholders,
+                repetitions,
+            ) {
+                matches.push(Match {
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start_point: node.start_position(),
+                    end_point: node.end_position(),
+                    captures,
+                });
+            }
+        }
     }
 
     if cursor.goto_first_child() {
         loop {
-            collect_matches(cursor, pattern, matches, source_text, pattern_text, reverse_placeholders);
+            collect_matches(
+                cursor,
+                pattern,
+                matches,
+                source_text,
+                pattern_text,
+                reverse_placeholders,
+                repetitions,
+            );
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -161,18 +334,122 @@ fn collect_matches(
 /// Preprocess a snippet, replacing `$name` placeholders with unique
 /// sentinel identifiers so tree-sitter can parse them.
 ///
-/// Returns the processed snippet text and a map of placeholder names.
-/// `$foo` → `_pw_1` at all occurrences (same name → same sentinel).
-fn preprocess_snippet(snippet: &str) -> (String, HashMap<String, String>) {
+/// Also handles Rust-style repetition syntax:
+/// - `$($name),*` — zero or more comma-separated
+/// - `$($name),+` — one or more comma-separated
+///
+/// Returns the processed snippet text, a map of placeholder names,
+/// and a map of sentinels with repetition info.
+fn preprocess_snippet(
+    snippet: &str,
+) -> (
+    String,
+    HashMap<String, String>,
+    HashMap<String, RepetitionInfo>,
+) {
     let mut result = String::with_capacity(snippet.len());
     let mut placeholders: HashMap<String, String> = HashMap::new();
+    let mut repetitions: HashMap<String, RepetitionInfo> = HashMap::new();
     let mut counter = 0usize;
     let mut chars = snippet.char_indices().peekable();
 
     while let Some((_, c)) = chars.next() {
         if c == '$' {
             if let Some(&(_, next)) = chars.peek() {
-                if next.is_ascii_alphabetic() || next == '_' {
+                if next == '(' {
+                    // Rust-style repetition: $($name)sep*  or  $($name)sep+
+                    chars.next(); // consume '('
+
+                    // Read inner content until matching ')'
+                    let mut inner = String::new();
+                    let mut depth = 1;
+                    let mut balanced = false;
+                    while let Some(&(_, ic)) = chars.peek() {
+                        if ic == '(' {
+                            depth += 1;
+                            inner.push(ic);
+                            chars.next();
+                        } else if ic == ')' {
+                            depth -= 1;
+                            chars.next();
+                            if depth == 0 {
+                                balanced = true;
+                                break;
+                            }
+                            inner.push(ic);
+                        } else {
+                            inner.push(ic);
+                            chars.next();
+                        }
+                    }
+
+                    if !balanced {
+                        // Unmatched parens — treat as literal
+                        result.push_str("$(");
+                        result.push_str(&inner);
+                        continue;
+                    }
+
+                    // Read separator (anything between ')' and operator)
+                    let mut sep = String::new();
+                    while let Some(&(_, sc)) = chars.peek() {
+                        if sc == '*' || sc == '+' || sc == '?' {
+                            break;
+                        }
+                        sep.push(sc);
+                        chars.next();
+                    }
+
+                    // Read operator
+                    let op = match chars.next() {
+                        Some((_, '*')) => "*".to_string(),
+                        Some((_, '+')) => "+".to_string(),
+                        _ => {
+                            // Invalid repetition syntax — treat as literal
+                            result.push_str("$(");
+                            result.push_str(&inner);
+                            result.push_str(&sep);
+                            continue;
+                        }
+                    };
+
+                    // Extract inner placeholder: $name (ignore any trailing content like commas)
+                    let inner_trimmed = inner.trim();
+                    let name = if let Some(rest) = inner_trimmed.strip_prefix('$') {
+                        let mut cleaned = String::new();
+                        for ch in rest.trim().chars() {
+                            if ch.is_ascii_alphanumeric() || ch == '_' {
+                                cleaned.push(ch);
+                            } else {
+                                break;
+                            }
+                        }
+                        cleaned
+                    } else {
+                        String::new()
+                    };
+
+                    if name.is_empty() {
+                        // Not valid repetition syntax — treat as literal
+                        result.push_str("$(");
+                        result.push_str(&inner);
+                        result.push_str(&sep);
+                        result.push_str(&op);
+                        continue;
+                    }
+
+                    if let Some(existing) = placeholders.get(&name) {
+                        result.push_str(existing);
+                        repetitions.insert(existing.clone(), RepetitionInfo { op });
+                    } else {
+                        counter += 1;
+                        let sentinel = format!("_pw_{}", counter);
+                        placeholders.insert(name, sentinel.clone());
+                        repetitions.insert(sentinel.clone(), RepetitionInfo { op });
+                        result.push_str(&sentinel);
+                    }
+                    continue;
+                } else if next.is_ascii_alphabetic() || next == '_' {
                     let mut name = String::new();
                     while let Some(&(_, c)) = chars.peek() {
                         if c.is_ascii_alphanumeric() || c == '_' {
@@ -197,7 +474,7 @@ fn preprocess_snippet(snippet: &str) -> (String, HashMap<String, String>) {
         result.push(c);
     }
 
-    (result, placeholders)
+    (result, placeholders, repetitions)
 }
 
 /// Find all snippet matches in source text.
@@ -205,12 +482,15 @@ fn preprocess_snippet(snippet: &str) -> (String, HashMap<String, String>) {
 /// Named nodes (identifiers, literals) are matched by text content by
 /// default. Prefix an identifier with `$` (e.g. `$x`) to match any
 /// value at that position.
+///
+/// Use `$($name)sep*` / `$($name)sep+` (Rust macro repetition syntax)
+/// for zero-or-more / one-or-more matching in the last child position.
 pub fn find_snippet_matches(
     source: &str,
     snippet: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let (pattern_text, placeholders) = preprocess_snippet(snippet);
+    let (pattern_text, placeholders, repetitions) = preprocess_snippet(snippet);
     let reverse_ph = reverse_placeholder_map(&placeholders);
 
     let mut parser = Parser::new();
@@ -221,20 +501,26 @@ pub fn find_snippet_matches(
     let snippet_tree = parser
         .parse(&pattern_text, None)
         .ok_or("Failed to parse snippet")?;
-    let pattern =
-        extract_pattern(snippet_tree.root_node()).ok_or("Could not extract pattern from snippet")?;
+    let pattern = extract_pattern(snippet_tree.root_node())
+        .ok_or("Could not extract pattern from snippet")?;
 
     if has_error(pattern) {
         return Err("Snippet contains syntax errors".to_string());
     }
 
-    let source_tree = parser
-        .parse(source, None)
-        .ok_or("Failed to parse source")?;
+    let source_tree = parser.parse(source, None).ok_or("Failed to parse source")?;
 
     let mut matches = Vec::new();
     let mut cursor = source_tree.root_node().walk();
-    collect_matches(&mut cursor, pattern, &mut matches, source, &pattern_text, &reverse_ph);
+    collect_matches(
+        &mut cursor,
+        pattern,
+        &mut matches,
+        source,
+        &pattern_text,
+        &reverse_ph,
+        &repetitions,
+    );
     Ok(matches)
 }
 
@@ -244,17 +530,14 @@ pub fn find_query_matches(
     query_str: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let query = Query::new(lang, query_str).map_err(|e| {
-        format!("Query error at {}:{}: {}", e.row, e.column, e.message)
-    })?;
+    let query = Query::new(lang, query_str)
+        .map_err(|e| format!("Query error at {}:{}: {}", e.row, e.column, e.message))?;
 
     let mut parser = Parser::new();
     parser
         .set_language(lang)
         .map_err(|_| "Failed to set language".to_string())?;
-    let source_tree = parser
-        .parse(source, None)
-        .ok_or("Failed to parse source")?;
+    let source_tree = parser.parse(source, None).ok_or("Failed to parse source")?;
 
     let mut qc = QueryCursor::new();
     let mut query_matches = qc.matches(&query, source_tree.root_node(), source.as_bytes());
@@ -509,8 +792,7 @@ class Outer {
     #[test]
     fn test_query_no_matches() {
         let source = "class A { void f() { return 42; } }";
-        let matches =
-            find_query_matches(source, "(if_statement) @matched", &java_lang()).unwrap();
+        let matches = find_query_matches(source, "(if_statement) @matched", &java_lang()).unwrap();
         assert!(matches.is_empty());
     }
 
@@ -554,13 +836,149 @@ class Outer {
 
     #[test]
     fn test_preprocess_replaces_dollar() {
-        let (text, _) = preprocess_snippet("$x = $y;");
+        let (text, _, _) = preprocess_snippet("$x = $y;");
         assert_eq!(text, "_pw_1 = _pw_2;");
     }
 
     #[test]
     fn test_preprocess_no_dollar() {
-        let (text, _) = preprocess_snippet("x = y;");
+        let (text, _, _) = preprocess_snippet("x = y;");
         assert_eq!(text, "x = y;");
+    }
+
+    // ——— repetition syntax ———
+
+    #[test]
+    fn test_preprocess_repetition_star() {
+        let (text, placeholders, reps) = preprocess_snippet("$f($($arg,)*)");
+        // Should produce: _pw_1(_pw_2) with _pw_2 marked as repetition "*"
+        assert_eq!(text, "_pw_1(_pw_2)");
+        assert_eq!(placeholders.get("f").unwrap(), "_pw_1");
+        assert_eq!(placeholders.get("arg").unwrap(), "_pw_2");
+        assert_eq!(reps.get("_pw_2").unwrap().op, "*");
+    }
+
+    #[test]
+    fn test_preprocess_repetition_plus() {
+        let (_, _, reps) = preprocess_snippet("$($arg,)+");
+        assert!(reps.get("_pw_1").is_some());
+        assert_eq!(reps.get("_pw_1").unwrap().op, "+");
+    }
+
+    #[test]
+    fn test_repetition_matches_zero_args() {
+        // $f($($arg,)*) should match f() (zero args)
+        let source = "class A { void m() { f(); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        // $arg should capture empty string
+        assert_eq!(m.captures.get("arg").map(|s| s.as_str()), Some(""));
+    }
+
+    #[test]
+    fn test_repetition_matches_one_arg() {
+        // $f($($arg,)*) should match f(x) (one arg)
+        let source = "class A { void m() { f(x); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        assert_eq!(m.captures.get("arg").map(|s| s.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn test_repetition_matches_multiple_args() {
+        // $f($($arg,)*) should match f(x, y, z) (three args)
+        let source = "class A { void m() { f(x, y, z); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        assert_eq!(m.captures.get("f").unwrap(), "f");
+        // Captured text spans all args including separators
+        assert!(m.captures.get("arg").unwrap().len() >= 3);
+        assert!(m.captures.get("arg").unwrap().contains('x'));
+        assert!(m.captures.get("arg").unwrap().contains('y'));
+        assert!(m.captures.get("arg").unwrap().contains('z'));
+    }
+
+    #[test]
+    fn test_repetition_plus_requires_at_least_one() {
+        // $f($($arg,)+) should NOT match f() (zero args)
+        let source = "class A { void m() { f(); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)+);", &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_repetition_plus_matches_one() {
+        // $f($($arg,)+) should match f(x) (one arg)
+        let source = "class A { void m() { f(x); } }";
+        let matches = find_snippet_matches(source, "$f($($arg,)+);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    // ——— statement unwrapping ———
+
+    #[test]
+    fn test_unwrap_expression_in_return_statement() {
+        // Pattern `users.$method()` (expression_statement) should match
+        // a method call inside a return statement via unwrapping
+        let source = "class A { void m() { return users.size(); } }";
+        // With repetition: $($arg,)* so () matches zero args
+        let matches =
+            find_snippet_matches(source, "users.$method($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "should match return users.size() via unwrapping"
+        );
+        let m = &matches[0];
+        assert_eq!(m.captures.get("method").unwrap(), "size");
+    }
+
+    #[test]
+    fn test_unwrap_expression_in_variable_declaration() {
+        // Pattern `users.$method()` should match
+        // a method call inside a variable declaration
+        let source = "class A { void m() { String s = users.get(id); } }";
+        let matches =
+            find_snippet_matches(source, "users.$method($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "should match users.get(id) in variable decl"
+        );
+        assert_eq!(matches[0].captures.get("method").unwrap(), "get");
+    }
+
+    #[test]
+    fn test_unwrap_no_duplicate_with_direct_match() {
+        // When the pattern directly matches an expression_statement,
+        // we should NOT also get a duplicate inner match
+        let source = "class A { void m() { users.size(); } }";
+        let matches =
+            find_snippet_matches(source, "users.$method($($arg,)*);", &java_lang()).unwrap();
+        // Should get exactly 1 match (the expression_statement)
+        assert_eq!(matches.len(), 1);
+    }
+
+    // ——— combined: $method() matching on UserService.java ———
+
+    #[test]
+    fn test_method_with_any_args_matches_all_forms() {
+        // The original failing case: users.$method() should match
+        // all method calls on users regardless of arguments
+        let source = r#"
+class A {
+    void f() {
+        users.size();
+        String s = users.get(id);
+        return users.remove(id);
+    }
+}"#;
+        let matches =
+            find_snippet_matches(source, "users.$method($($arg,)*);", &java_lang()).unwrap();
+        // Should match all three: users.size(), users.get(id), users.remove(id)
+        assert_eq!(matches.len(), 3, "should match all three forms");
     }
 }

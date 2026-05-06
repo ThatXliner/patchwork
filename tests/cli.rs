@@ -29,7 +29,12 @@ fn run_pipe(args: &[&str], input: &str) -> Result<String, String> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.as_mut().unwrap().write_all(input.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -51,7 +56,11 @@ fn run_with_args(args: &[&str]) -> Result<String, String> {
 
 #[test]
 fn test_find_stdin_java() {
-    let out = run_pipe(&["find", "-l", "java", "-p", "return 1;"], "class A { void f() { return 1; } }").unwrap();
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "return 1;"],
+        "class A { void f() { return 1; } }",
+    )
+    .unwrap();
     assert!(out.contains("return 1;"));
 }
 
@@ -63,7 +72,11 @@ fn test_find_stdin_python() {
 
 #[test]
 fn test_find_no_matches() {
-    let out = run_pipe(&["find", "-l", "java", "-p", "return 1;"], "class A { void f() { } }").unwrap();
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "return 1;"],
+        "class A { void f() { } }",
+    )
+    .unwrap();
     assert!(out.is_empty());
 }
 
@@ -77,7 +90,19 @@ fn test_find_requires_language_on_stdin() {
 
 #[test]
 fn test_replace_stdin() {
-    let out = run_pipe(&["replace", "-l", "java", "-p", "return 1;", "-r", "return 2;"], "class A { void f() { return 1; } }").unwrap();
+    let out = run_pipe(
+        &[
+            "replace",
+            "-l",
+            "java",
+            "-p",
+            "return 1;",
+            "-r",
+            "return 2;",
+        ],
+        "class A { void f() { return 1; } }",
+    )
+    .unwrap();
     assert!(out.contains("return 2;"));
     assert!(!out.contains("return 1;"));
 }
@@ -90,11 +115,24 @@ fn test_replace_in_place() -> std::io::Result<()> {
     std::fs::write(&file_path, "class A { void f() { return 1; } }")?;
 
     let output = patchwork()
-        .args(&["replace", "-i", "-l", "java", "-p", "return 1;", "-r", "return 99;"])
+        .args(&[
+            "replace",
+            "-i",
+            "-l",
+            "java",
+            "-p",
+            "return 1;",
+            "-r",
+            "return 99;",
+        ])
         .arg(file_path.to_str().unwrap())
         .output()
         .unwrap();
-    assert!(output.status.success(), "replace -i failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "replace -i failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let result = std::fs::read_to_string(&file_path)?;
     assert!(result.contains("return 99;"), "result: {}", result);
@@ -107,9 +145,18 @@ fn test_replace_in_place() -> std::io::Result<()> {
 #[test]
 fn test_insert_after_stdin() {
     let out = run_pipe(
-        &["insert-after", "-l", "java", "-p", "return 1;", "--code", "\nreturn 2;"],
+        &[
+            "insert-after",
+            "-l",
+            "java",
+            "-p",
+            "return 1;",
+            "--code",
+            "\nreturn 2;",
+        ],
         "class A { void f() { return 1; } }",
-    ).unwrap();
+    )
+    .unwrap();
     assert!(out.contains("return 2;"));
 }
 
@@ -117,7 +164,11 @@ fn test_insert_after_stdin() {
 
 #[test]
 fn test_delete_stdin() {
-    let out = run_pipe(&["delete", "-l", "java", "-p", "return 1;"], "class A { void f() { return 1; } }").unwrap();
+    let out = run_pipe(
+        &["delete", "-l", "java", "-p", "return 1;"],
+        "class A { void f() { return 1; } }",
+    )
+    .unwrap();
     assert!(!out.contains("return 1;"));
 }
 
@@ -126,9 +177,16 @@ fn test_delete_stdin() {
 #[test]
 fn test_find_query_java() {
     let out = run_pipe(
-        &["find", "-l", "java", "-q", "(method_declaration name: (identifier) @name)"],
+        &[
+            "find",
+            "-l",
+            "java",
+            "-q",
+            "(method_declaration name: (identifier) @name)",
+        ],
         "class A { void f() {} }",
-    ).unwrap();
+    )
+    .unwrap();
     assert!(out.contains("f"));
 }
 
@@ -150,7 +208,10 @@ fn test_no_pattern_or_query_fails() {
 
 #[test]
 fn test_in_place_requires_files() {
-    let result = run_pipe(&["replace", "-i", "-l", "java", "-p", "x", "-r", "y"], "class A {}");
+    let result = run_pipe(
+        &["replace", "-i", "-l", "java", "-p", "x", "-r", "y"],
+        "class A {}",
+    );
     assert!(result.is_err());
 }
 
@@ -160,7 +221,15 @@ fn test_in_place_requires_files() {
 fn test_replace_with_placeholder_substitution() {
     // patchwork replace -i -p 'getOldData($a)' -r 'getData($a)' src/**/*.java
     let out = run_pipe(
-        &["replace", "-l", "java", "-p", "getOldData($a)", "-r", "getData($a)"],
+        &[
+            "replace",
+            "-l",
+            "java",
+            "-p",
+            "getOldData($a)",
+            "-r",
+            "getData($a)",
+        ],
         "class A { void f() { getOldData(x); } }",
     )
     .unwrap();
@@ -172,7 +241,15 @@ fn test_replace_with_placeholder_substitution() {
 fn test_replace_arg_reorder() {
     // patchwork replace -i -p '$f($a, $b)' -r '$f($b, $a)' src/*.py
     let out = run_pipe(
-        &["replace", "-l", "python", "-p", "$f($a, $b)", "-r", "$f($b, $a)"],
+        &[
+            "replace",
+            "-l",
+            "python",
+            "-p",
+            "$f($a, $b)",
+            "-r",
+            "$f($b, $a)",
+        ],
         "foo(1, 2)\n",
     )
     .unwrap();
@@ -183,7 +260,15 @@ fn test_replace_arg_reorder() {
 fn test_insert_before_with_placeholder() {
     // patchwork insert-before -p 'logger.debug($msg)' --code 'tracing.debug($msg)' src/*.py
     let out = run_pipe(
-        &["insert-before", "-l", "java", "-p", "debug($msg)", "--code", "tracing.debug($msg)"],
+        &[
+            "insert-before",
+            "-l",
+            "java",
+            "-p",
+            "debug($msg)",
+            "--code",
+            "tracing.debug($msg)",
+        ],
         "class A { void f() { debug(x); } }",
     )
     .unwrap();
@@ -195,7 +280,15 @@ fn test_insert_before_with_placeholder() {
 fn test_insert_after_with_placeholder() {
     // Symmetric to insert-before: --code with $name substitution
     let out = run_pipe(
-        &["insert-after", "-l", "java", "-p", "debug($msg)", "--code", "warn($msg)"],
+        &[
+            "insert-after",
+            "-l",
+            "java",
+            "-p",
+            "debug($msg)",
+            "--code",
+            "warn($msg)",
+        ],
         "class A { void f() { debug(x); } }",
     )
     .unwrap();
@@ -217,7 +310,14 @@ fn test_delete_with_placeholder() {
 fn test_replace_stdout_file_mode() {
     // patchwork replace -p 'BufferedReader $r' -r 'Reader $r' src/**/*.java
     let out = with_temp_java_file("class A { void f() { BufferedReader br; } }", |path| {
-        run_with_args(&["replace", "-p", "BufferedReader $r", "-r", "Reader $r", path])
+        run_with_args(&[
+            "replace",
+            "-p",
+            "BufferedReader $r",
+            "-r",
+            "Reader $r",
+            path,
+        ])
     });
     assert!(out.contains("Reader br"));
     assert!(!out.contains("BufferedReader br"));

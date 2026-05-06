@@ -7,9 +7,9 @@ use std::io::{self, Read};
 
 use clap::Parser;
 use cli::{Cli, Command};
-use edit::{matches_to_edits, apply_edits, Operation};
+use edit::{apply_edits, matches_to_edits, Operation};
 use language::Lang;
-use matcher::{find_snippet_matches, find_query_matches, Match};
+use matcher::{find_query_matches, find_snippet_matches, Match};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -26,7 +26,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             replacement,
             in_place,
             files,
-        } => cmd_edit(pattern, query, files, &cli, Operation::Replace(replacement.clone()), *in_place),
+        } => cmd_edit(
+            pattern,
+            query,
+            files,
+            &cli,
+            Operation::Replace(replacement.clone()),
+            *in_place,
+        ),
         Command::Delete {
             pattern,
             query,
@@ -39,14 +46,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             code,
             in_place,
             files,
-        } => cmd_edit(pattern, query, files, &cli, Operation::InsertBefore(code.clone()), *in_place),
+        } => cmd_edit(
+            pattern,
+            query,
+            files,
+            &cli,
+            Operation::InsertBefore(code.clone()),
+            *in_place,
+        ),
         Command::InsertAfter {
             pattern,
             query,
             code,
             in_place,
             files,
-        } => cmd_edit(pattern, query, files, &cli, Operation::InsertAfter(code.clone()), *in_place),
+        } => cmd_edit(
+            pattern,
+            query,
+            files,
+            &cli,
+            Operation::InsertAfter(code.clone()),
+            *in_place,
+        ),
     }
 }
 

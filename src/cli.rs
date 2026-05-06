@@ -3,7 +3,12 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "patchwork", about = "AST-aware code editing with tree-sitter")]
 pub struct Cli {
-    #[arg(short = 'l', long = "language", global = true, help = "Force language (java, python, js, ts, tsx)")]
+    #[arg(
+        short = 'l',
+        long = "language",
+        global = true,
+        help = "Force language (java, python, js, ts, tsx)"
+    )]
     pub language: Option<String>,
 
     #[command(subcommand)]
