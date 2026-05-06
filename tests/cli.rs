@@ -347,3 +347,55 @@ fn test_find_with_placeholder() {
     .unwrap();
     assert!(out.contains("return 42;"));
 }
+
+// ——— special tokens: $BODY, $STMT, $EXPR ———
+
+#[test]
+fn test_body_in_block() {
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "if (true) { $BODY }"],
+        "class A { void m() { if (true) { return 1; } } }",
+    )
+    .unwrap();
+    assert!(out.contains("return 1;"), "got: {}", out);
+}
+
+#[test]
+fn test_body_matches_empty_block() {
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "if (true) { $BODY }"],
+        "class A { void m() { if (true) {} } }",
+    )
+    .unwrap();
+    assert!(out.contains("if (true) {}"));
+}
+
+#[test]
+fn test_stmt_find() {
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "$STMT"],
+        "class A { void m() { return 42; } }",
+    )
+    .unwrap();
+    assert!(out.contains("return 42;"));
+}
+
+#[test]
+fn test_expr_replace() {
+    // Replace any expression inside debug() with log()
+    let out = run_pipe(
+        &[
+            "replace",
+            "-l",
+            "java",
+            "-p",
+            "debug($EXPR);",
+            "-r",
+            "log($EXPR);",
+        ],
+        "class A { void m() { debug(x); } }",
+    )
+    .unwrap();
+    assert!(out.contains("log(x)"), "got: {}", out);
+    assert!(!out.contains("debug(x)"));
+}

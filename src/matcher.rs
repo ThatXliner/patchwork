@@ -32,6 +32,20 @@ pub(crate) struct RepetitionInfo {
     pub(crate) kind: RepetitionKind,
 }
 
+/// Pre-defined special placeholder tokens that match by node role
+/// rather than by structure alone.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SpecialKind {
+    /// `$BODY` — zero or more statements inside a block.
+    /// Statement-aware: peeks through tree-sitter's `expression_statement`
+    /// wrappers so it works where `$$$name` doesn't.
+    Body,
+    /// `$STMT` — a single statement of any kind.
+    Stmt,
+    /// `$EXPR` — a single expression.
+    Expr,
+}
+
 fn is_root_wrapper(kind: &str) -> bool {
     matches!(kind, "program" | "module")
 }
@@ -128,6 +142,7 @@ fn structurally_matches(
     captures: &mut HashMap<String, String>,
     reverse_placeholders: &HashMap<String, String>,
     repetitions: &HashMap<String, RepetitionInfo>,
+    specials: &HashMap<String, SpecialKind>,
 ) -> bool {
     // A $ placeholder matches any single source node (any kind, any text)
     if is_placeholder(pattern_node, pattern_text) {
@@ -140,6 +155,28 @@ fn structurally_matches(
     }
 
     if source_node.kind() != pattern_node.kind() {
+        // Check if pattern node wraps $STMT/$EXPR/$BODY.
+        // Only fires on kind mismatch — e.g., `expression_statement` wrapping
+        // `$STMT` matching against `return_statement`.
+        if let Some(special) = wraps_special(pattern_node, pattern_text, specials) {
+            let matched_kind = match special {
+                SpecialKind::Stmt => is_statement_kind(source_node.kind()),
+                SpecialKind::Expr => !is_statement_kind(source_node.kind())
+                    && source_node.kind() != "program"
+                    && source_node.kind() != "module",
+                SpecialKind::Body => is_statement_kind(source_node.kind()),
+            };
+            if matched_kind {
+                if let Some(sentinel) = inner_sentinel(pattern_node, pattern_text) {
+                    if let Some(name) = reverse_placeholders.get(&sentinel) {
+                        let matched =
+                            &source_text[source_node.start_byte()..source_node.end_byte()];
+                        captures.insert(name.clone(), matched.to_string());
+                    }
+                }
+                return true;
+            }
+        }
         return false;
     }
 
@@ -187,6 +224,7 @@ fn structurally_matches(
                 captures,
                 reverse_placeholders,
                 repetitions,
+                specials,
             ) {
                 return false;
             }
@@ -213,9 +251,10 @@ fn structurally_matches(
     // wraps_multi_placeholder, but only when it's the sole named child
     // (otherwise argument_list wrapping $$$args would trigger at the wrong level).
     let p_children = named_children(pattern_node);
-    let has_multi = p_children
-        .iter()
-        .any(|c| is_multi_placeholder(*c, pattern_text, repetitions));
+    let has_multi = p_children.iter().any(|c| {
+        is_multi_placeholder(*c, pattern_text, repetitions)
+            || matches!(wraps_special(*c, pattern_text, specials), Some(SpecialKind::Body))
+    });
 
     if !has_multi {
         // No multi-child placeholder — exact child count match required
@@ -246,6 +285,7 @@ fn structurally_matches(
         captures,
         reverse_placeholders,
         repetitions,
+        specials,
     )
 }
 
@@ -264,6 +304,46 @@ fn is_multi_placeholder(
     matches!(repetitions.get(text), Some(info) if info.kind == RepetitionKind::MultiChild)
 }
 
+/// Check if a source node kind represents a statement.
+fn is_statement_kind(kind: &str) -> bool {
+    kind.ends_with("_statement")
+        || kind == "block"
+        || kind == "local_variable_declaration"
+        || kind == "switch_block_statement_group"
+        || kind == "labeled_statement"
+}
+
+/// Check if a pattern node wraps a special placeholder sentinel — i.e.,
+/// it's a single-child wrapper (like `expression_statement`) whose only
+/// named child is a `$BODY`, `$STMT`, or `$EXPR` sentinel.
+fn wraps_special(
+    node: Node,
+    pattern_text: &str,
+    specials: &HashMap<String, SpecialKind>,
+) -> Option<SpecialKind> {
+    if node.named_child_count() == 1 {
+        if let Some(child) = node.named_child(0) {
+            if child.named_child_count() == 0 {
+                let text = &pattern_text[child.start_byte()..child.end_byte()];
+                return specials.get(text).cloned();
+            }
+        }
+    }
+    None
+}
+
+/// Extract the inner sentinel text from a single-child wrapper node.
+fn inner_sentinel(node: Node, pattern_text: &str) -> Option<String> {
+    if node.named_child_count() == 1 {
+        if let Some(child) = node.named_child(0) {
+            if child.named_child_count() == 0 {
+                return Some(pattern_text[child.start_byte()..child.end_byte()].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Recursively match a child pattern node against a single source node.
 /// Thin wrapper that delegates to `structurally_matches`.
 fn match_single_child(
@@ -274,6 +354,7 @@ fn match_single_child(
     captures: &mut HashMap<String, String>,
     reverse_placeholders: &HashMap<String, String>,
     repetitions: &HashMap<String, RepetitionInfo>,
+    specials: &HashMap<String, SpecialKind>,
 ) -> bool {
     structurally_matches(
         s_child,
@@ -283,6 +364,7 @@ fn match_single_child(
         captures,
         reverse_placeholders,
         repetitions,
+        specials,
     )
 }
 
@@ -301,6 +383,7 @@ fn match_children_suffix(
     captures: &mut HashMap<String, String>,
     reverse_placeholders: &HashMap<String, String>,
     repetitions: &HashMap<String, RepetitionInfo>,
+    specials: &HashMap<String, SpecialKind>,
 ) -> bool {
     if pi >= p_children.len() {
         // No more pattern children — all source children must be consumed
@@ -308,6 +391,52 @@ fn match_children_suffix(
     }
 
     let p_child = p_children[pi];
+
+    // $BODY wrapper: consume 0+ source children (any statements)
+    if let Some(SpecialKind::Body) = wraps_special(p_child, pattern_text, specials) {
+        let sentinel = inner_sentinel(p_child, pattern_text).unwrap_or_default();
+        let min = 0;
+        let max = s_children
+            .len()
+            .saturating_sub(si)
+            .saturating_sub(p_children.len().saturating_sub(pi + 1));
+
+        for n in min..=max {
+            let saved = captures.clone();
+            let end = si + n;
+
+            if let Some(name) = reverse_placeholders.get(&sentinel) {
+                if n > 0 {
+                    let first = s_children[si];
+                    let last = s_children[end - 1];
+                    let text =
+                        &source_text[first.start_byte()..last.end_byte()];
+                    captures.insert(name.clone(), text.to_string());
+                } else {
+                    captures.insert(name.clone(), String::new());
+                }
+            }
+
+            if match_children_suffix(
+                s_children,
+                p_children,
+                end,
+                pi + 1,
+                source_text,
+                pattern_text,
+                captures,
+                reverse_placeholders,
+                repetitions,
+                specials,
+            ) {
+                return true;
+            }
+
+            *captures = saved;
+        }
+
+        return false;
+    }
 
     if is_multi_placeholder(p_child, pattern_text, repetitions) {
         let sentinel =
@@ -348,6 +477,7 @@ fn match_children_suffix(
                 captures,
                 reverse_placeholders,
                 repetitions,
+                specials,
             ) {
                 return true;
             }
@@ -372,6 +502,7 @@ fn match_children_suffix(
         captures,
         reverse_placeholders,
         repetitions,
+        specials,
     ) {
         return false;
     }
@@ -386,6 +517,7 @@ fn match_children_suffix(
         captures,
         reverse_placeholders,
         repetitions,
+        specials,
     )
 }
 
@@ -437,6 +569,7 @@ fn collect_matches(
     pattern_text: &str,
     reverse_placeholders: &HashMap<String, String>,
     repetitions: &HashMap<String, RepetitionInfo>,
+    specials: &HashMap<String, SpecialKind>,
 ) {
     let node = cursor.node();
 
@@ -450,6 +583,7 @@ fn collect_matches(
         &mut captures,
         reverse_placeholders,
         repetitions,
+        specials,
     ) {
         matches.push(Match {
             start_byte: node.start_byte(),
@@ -472,6 +606,7 @@ fn collect_matches(
                 &mut captures,
                 reverse_placeholders,
                 repetitions,
+                specials,
             ) {
                 matches.push(Match {
                     start_byte: node.start_byte(),
@@ -494,6 +629,7 @@ fn collect_matches(
                 pattern_text,
                 reverse_placeholders,
                 repetitions,
+                specials,
             );
             if !cursor.goto_next_sibling() {
                 break;
@@ -518,10 +654,12 @@ fn preprocess_snippet(
     String,
     HashMap<String, String>,
     HashMap<String, RepetitionInfo>,
+    HashMap<String, SpecialKind>,
 ) {
     let mut result = String::with_capacity(snippet.len());
     let mut placeholders: HashMap<String, String> = HashMap::new();
     let mut repetitions: HashMap<String, RepetitionInfo> = HashMap::new();
+    let mut specials: HashMap<String, SpecialKind> = HashMap::new();
     let mut counter = 0usize;
     let mut chars = snippet.char_indices().peekable();
 
@@ -671,6 +809,36 @@ fn preprocess_snippet(
                             break;
                         }
                     }
+                    // Check for pre-defined special tokens: $BODY, $STMT, $EXPR
+                    let special_kind = match name.as_str() {
+                        "BODY" => Some(SpecialKind::Body),
+                        "STMT" => Some(SpecialKind::Stmt),
+                        "EXPR" => Some(SpecialKind::Expr),
+                        _ => None,
+                    };
+                    if let Some(kind) = special_kind {
+                        counter += 1;
+                        let sentinel = match kind {
+                            SpecialKind::Body => format!("_pw_body_{}", counter),
+                            SpecialKind::Stmt => format!("_pw_stmt_{}", counter),
+                            SpecialKind::Expr => format!("_pw_expr_{}", counter),
+                        };
+                        placeholders.insert(name, sentinel.clone());
+                        if kind == SpecialKind::Body {
+                            repetitions.insert(sentinel.clone(), RepetitionInfo {
+                                op: "*".to_string(),
+                                kind: RepetitionKind::MultiChild,
+                            });
+                        }
+                        // $BODY and $STMT need a semicolon to be valid
+                        // statements in tree-sitter; $EXPR does not.
+                        result.push_str(&sentinel);
+                        if kind != SpecialKind::Expr {
+                            result.push(';');
+                        }
+                        specials.insert(sentinel, kind);
+                        continue;
+                    }
                     if let Some(existing) = placeholders.get(&name) {
                         result.push_str(existing);
                     } else {
@@ -686,7 +854,7 @@ fn preprocess_snippet(
         result.push(c);
     }
 
-    (result, placeholders, repetitions)
+    (result, placeholders, repetitions, specials)
 }
 
 /// Find all snippet matches in source text.
@@ -703,7 +871,7 @@ pub fn find_snippet_matches(
     snippet: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let (pattern_text, placeholders, repetitions) = preprocess_snippet(snippet);
+    let (pattern_text, placeholders, repetitions, specials) = preprocess_snippet(snippet);
     let reverse_ph = reverse_placeholder_map(&placeholders);
 
     let mut parser = Parser::new();
@@ -733,6 +901,7 @@ pub fn find_snippet_matches(
         &pattern_text,
         &reverse_ph,
         &repetitions,
+        &specials,
     );
     Ok(matches)
 }
@@ -1049,13 +1218,13 @@ class Outer {
 
     #[test]
     fn test_preprocess_replaces_dollar() {
-        let (text, _, _) = preprocess_snippet("$x = $y;");
+        let (text, _, _, _) = preprocess_snippet("$x = $y;");
         assert_eq!(text, "_pw_1 = _pw_2;");
     }
 
     #[test]
     fn test_preprocess_no_dollar() {
-        let (text, _, _) = preprocess_snippet("x = y;");
+        let (text, _, _, _) = preprocess_snippet("x = y;");
         assert_eq!(text, "x = y;");
     }
 
@@ -1063,7 +1232,7 @@ class Outer {
 
     #[test]
     fn test_preprocess_repetition_star() {
-        let (text, placeholders, reps) = preprocess_snippet("$f($($arg,)*)");
+        let (text, placeholders, reps, _) = preprocess_snippet("$f($($arg,)*)");
         // Should produce: _pw_1(_pw_2) with _pw_2 marked as repetition "*"
         assert_eq!(text, "_pw_1(_pw_2)");
         assert_eq!(placeholders.get("f").unwrap(), "_pw_1");
@@ -1073,7 +1242,7 @@ class Outer {
 
     #[test]
     fn test_preprocess_repetition_plus() {
-        let (_, _, reps) = preprocess_snippet("$($arg,)+");
+        let (_, _, reps, _) = preprocess_snippet("$($arg,)+");
         assert!(reps.get("_pw_1").is_some());
         assert_eq!(reps.get("_pw_1").unwrap().op, "+");
     }
@@ -1318,7 +1487,7 @@ class A {
 
     #[test]
     fn test_triple_dollar_preprocess() {
-        let (text, placeholders, reps) = preprocess_snippet("$$$args");
+        let (text, placeholders, reps, _) = preprocess_snippet("$$$args");
         assert!(text.starts_with("_pw_multi_"), "got: {}", text);
         assert_eq!(placeholders.get("args").map(|s| s.as_str()), Some(text.as_str()));
         let rep = reps.get(text.as_str()).unwrap();
@@ -1328,12 +1497,119 @@ class A {
 
     #[test]
     fn test_triple_dollar_preprocess_unnamed() {
-        let (text, placeholders, reps) = preprocess_snippet("$$$");
+        let (text, placeholders, reps, _) = preprocess_snippet("$$$");
         assert!(text.starts_with("_pw_multi_"), "got: {}", text);
         // No placeholder name registered for anonymous $$$
         assert!(!placeholders.contains_key(""));
         let rep = reps.get(text.as_str()).unwrap();
         assert_eq!(rep.kind, RepetitionKind::MultiChild);
+    }
+
+    // ——— special tokens: $BODY, $STMT, $EXPR ———
+
+    #[test]
+    fn test_body_matches_zero_statements() {
+        // if (true) { $BODY } should match an empty block
+        let source = "class A { void m() { if (true) {} } }";
+        let matches =
+            find_snippet_matches(source, "if (true) { $BODY }", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("BODY").map(|s| s.as_str()), Some(""));
+    }
+
+    #[test]
+    fn test_body_matches_single_statement() {
+        let source = "class A { void m() { if (true) { return 42; } } }";
+        let matches =
+            find_snippet_matches(source, "if (true) { $BODY }", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let cap = matches[0].captures.get("BODY").unwrap();
+        assert!(cap.contains("return"), "should contain return: {}", cap);
+    }
+
+    #[test]
+    fn test_body_matches_multiple_statements() {
+        let source = "class A { void m() { if (true) { debug(x); return 42; } } }";
+        let matches =
+            find_snippet_matches(source, "if (true) { $BODY }", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let cap = matches[0].captures.get("BODY").unwrap();
+        assert!(cap.contains("debug"), "should contain debug: {}", cap);
+        assert!(cap.contains("return"), "should contain return: {}", cap);
+    }
+
+    #[test]
+    fn test_body_preprocess() {
+        let (text, placeholders, reps, specials) = preprocess_snippet("$BODY");
+        assert!(text.starts_with("_pw_body_"), "got: {}", text);
+        // $BODY appends semicolon for valid statement parsing
+        let sentinel = text.trim_end_matches(';');
+        assert_eq!(placeholders.get("BODY").map(|s| s.as_str()), Some(sentinel));
+        let rep = reps.get(sentinel).unwrap();
+        assert_eq!(rep.kind, RepetitionKind::MultiChild);
+        assert_eq!(rep.op, "*");
+        assert_eq!(specials.get(sentinel), Some(&SpecialKind::Body));
+    }
+
+    #[test]
+    fn test_stmt_at_statement_level() {
+        // $STMT alone matches any single statement, including blocks.
+        // Block and return_statement both qualify.
+        let source = "class A { void m() { return 42; } }";
+        let matches = find_snippet_matches(source, "$STMT", &java_lang()).unwrap();
+        assert!(matches.len() >= 1);
+        let has_return = matches.iter().any(|m| {
+            m.captures.get("STMT").map(|s| s.as_str()) == Some("return 42;")
+        });
+        assert!(has_return, "should match return statement");
+    }
+
+    #[test]
+    fn test_stmt_matches_if_statement() {
+        let source = "class A { void m() { if (true) { return 1; } } }";
+        let matches = find_snippet_matches(source, "$STMT", &java_lang()).unwrap();
+        let has_if = matches.iter().any(|m| {
+            m.captures.get("STMT").map(|s| s.as_str()) == Some("if (true) { return 1; }")
+        });
+        assert!(has_if, "should match if statement");
+    }
+
+    #[test]
+    fn test_stmt_preprocess() {
+        let (text, placeholders, _, specials) = preprocess_snippet("$STMT");
+        assert!(text.starts_with("_pw_stmt_"), "got: {}", text);
+        let sentinel = text.trim_end_matches(';');
+        assert_eq!(placeholders.get("STMT").map(|s| s.as_str()), Some(sentinel));
+        assert_eq!(specials.get(sentinel), Some(&SpecialKind::Stmt));
+    }
+
+    #[test]
+    fn test_expr_at_expression_level() {
+        // $EXPR as a leaf should match any expression (like $name)
+        let source = "class A { void m() { debug(x); } }";
+        let matches =
+            find_snippet_matches(source, "debug($EXPR);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("EXPR").map(|s| s.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn test_expr_preprocess() {
+        let (text, placeholders, _, specials) = preprocess_snippet("$EXPR");
+        assert!(text.starts_with("_pw_expr_"), "got: {}", text);
+        assert_eq!(placeholders.get("EXPR").map(|s| s.as_str()), Some(text.as_str()));
+        assert_eq!(specials.get(text.as_str()), Some(&SpecialKind::Expr));
+    }
+
+    #[test]
+    fn test_body_combined_with_condition() {
+        // if ($EXPR) { $BODY } matches any if statement
+        let source = "class A { void m() { if (x > 0) { return x; } } }";
+        let matches =
+            find_snippet_matches(source, "if ($EXPR) { $BODY }", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].captures.get("EXPR").unwrap().contains("x > 0"));
+        assert!(matches[0].captures.get("BODY").unwrap().contains("return"));
     }
 
 }

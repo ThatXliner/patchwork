@@ -67,6 +67,8 @@ Does that mean patchwork is pointless?
 
 **What patchwork has that ast-grep doesn't:**
 - The `$($name)sep*` / `$($name)sep+` / `$($name)sep?` Rust-style repetition syntax (ast-grep uses `$$$NAME` which doesn't capture the separator) — this is genuinely novel
+- `$$$name` multi-node repetition at any position (ast-grep compatible)
+- Special tokens: `$BODY` (statement-aware block matching), `$STMT` (any statement), `$EXPR` (any expression)
 - A dedicated `insert-before` / `insert-after` command — useful for wrapping or logging instrumentation
 - Slightly smaller binary (~3MB vs ~10MB)
 - No config files, no YAML, no subcommands beyond the 5 operations — just `patchwork find|replace|delete|insert-before|insert-after`
@@ -121,6 +123,40 @@ patchwork delete -i -p 'debug($msg)' src/*.py
 
 # Match any return statement
 patchwork find -p 'return $val;' src/
+```
+
+### Multi-node repetition
+
+Match zero or more consecutive children at any position:
+
+```bash
+# Match any method call with any number of arguments
+patchwork find -p '$fn($$$args);' src/
+
+# Match all method calls on users (size(), get(id), remove(id))
+patchwork find -p 'users.$$$($($arg,)*);' src/
+```
+
+`$($name)sep*` matches repetitions at the last child position (Rust macro syntax). `$$$name` matches at any position (ast-grep compatible).
+
+### Special tokens
+
+Pre-defined shortcuts for common patterns:
+
+| Token | Matches | Example |
+|-------|---------|---------|
+| `$BODY` | Zero or more statements inside a block | `if ($EXPR) { $BODY }` |
+| `$STMT` | A single statement of any kind | `$STMT` matches `return 42;`, `if (x) {}`, etc. |
+| `$EXPR` | A single expression | `debug($EXPR);` matches `debug(x)`, `debug(f())` |
+
+`$BODY` is statement-aware — it works where `$$$name` doesn't because tree-sitter wraps bare identifiers in `expression_statement` nodes inside blocks. Use it to match arbitrary if/while/for bodies:
+
+```bash
+# Find all if statements regardless of body
+patchwork find -p 'if ($EXPR) { $BODY }' src/
+
+# Replace all debug calls with log calls
+patchwork replace -i -p 'debug($EXPR);' -r 'log($EXPR);' src/**/*.java
 ```
 
 ### Tree-sitter queries
@@ -181,6 +217,7 @@ Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate depend
 
 - **Single-file only** — no cross-file rename tracking or import updates
 - **Formatting** — replacement text isn't auto-indented; include your own whitespace
+- **`$$$name` in blocks** — `$$$name` doesn't match statements inside blocks due to tree-sitter's `expression_statement` wrappers. Use `$BODY` instead
 - **No model** — this is by design. Complex structural changes that need reasoning aren't supported. For those, use an LLM-based tool
 
 ## Status
