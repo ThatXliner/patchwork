@@ -36,22 +36,60 @@ You want to rename a function, swap an import, or update an API call across a co
 
 ## How it compares
 
-| Tool | Language | Parsing | Size | Languages | Best for |
+Let's be honest: patchwork is essentially a minimal subset of [ast-grep](https://github.com/ast-grep/ast-grep). Both use tree-sitter to parse code into ASTs, both match patterns structurally, both rewrite in-place. ast-grep came first, supports 25+ languages, has a YAML rule system, VS Code extension, LSP, MCP server, interactive mode, playground, pre-commit hooks, Node/Python bindings, and 174+ releases. patchwork is a few months old, supports 5 languages, and does one thing: CLI find/replace/delete/insert with a sed-like interface.
+
+Does that mean patchwork is pointless?
+
+| Tool | Language | Parsing | Size | Languages | Maturity |
 |---|---|---|---|---|---|
-| **patchwork** | Rust | tree-sitter AST | ~3MB | 5 | Simple CLI refactors, pipes, `$()*` repetition |
-| [ast-grep](https://github.com/ast-grep/ast-grep) | Rust | tree-sitter AST | ~10MB | 25+ | General refactoring, YAML rules, LSP/VS Code/MCP |
-| [Comby](https://comby.dev) | OCaml | parser-free | ~8MB | ~all | Quick cross-language/text-format replacements |
-| [Semgrep](https://github.com/semgrep/semgrep) | Python | real parsers | 200MB+ | 20+ | Security auditing with taint tracking & dataflow |
+| **patchwork** | Rust | tree-sitter AST | ~3MB | 5 | Alpha — one person, <1yr |
+| [ast-grep](https://github.com/ast-grep/ast-grep) | Rust | tree-sitter AST | ~10MB | 25+ | Mature — 174 releases, active community |
+| [Comby](https://comby.dev) | OCaml | parser-free | ~8MB | ~all | Mature |
+| [Semgrep](https://github.com/semgrep/semgrep) | Python | real parsers | 200MB+ | 20+ | Mature — enterprise security product |
 
-**patchwork vs ast-grep** (the closest alternative):
-- patchwork is purely CLI — no YAML rules, no interactive mode, no LSP. A drop-in for `sed` in shell scripts.
-- patchwork's `$($name)sep*` / `$($name)sep+` / `$($name)sep?` Rust-style repetition is unique here.
-- patchwork uses `$lowercase` placeholders (not `$CAPITAL`), which some find more natural.
-- ast-grep has a richer ecosystem — VS Code extension, MCP server, Python/Node bindings — if you need those.
+### Honest comparison with ast-grep
 
-**patchwork vs Comby**: patchwork uses real tree-sitter parsers so it understands language-specific AST structure. Comby is parser-free and works on any language, but with less structural precision.
+**What ast-grep has that patchwork doesn't:**
+- 25+ languages vs 5
+- YAML rule system (composable `inside`/`has`/`follows`/`precedes`/`not`/`any`/`all` rules)
+- `transform` system (regex substitution, case conversion, substring slicing on captured vars)
+- `FixConfig` for clean list-item deletion (expand start/end to remove surrounding commas)
+- VS Code extension, interactive mode, `ast-grep scan` for project-wide linting
+- LSP server (go-to-definition, hover, diagnostics via structural rules)
+- MCP server (Claude Code, Cursor, and other AI tools can drive ast-grep directly)
+- Node.js and Python bindings
+- Pre-commit hook support
+- Online playground, Codemod Studio
+- Stricter matching control: `strictness` levels (`cst`, `smart`, `ast`, `relaxed`, `signature`)
+- Same-name `$VAR` backreferences (`$A == $A` matches `a == a` but not `a == b`)
+- `$$VAR` for unnamed/anonymous node capture
+- Non-capturing variables (`$_VAR`) for performance
 
-**patchwork vs Semgrep**: Semgrep is heavy but delivers deep semantic analysis (taint tracking, dataflow). patchwork is for the 80% case: quick, correct structural edits that finish before your coffee gets cold.
+**What patchwork has that ast-grep doesn't:**
+- The `$($name)sep*` / `$($name)sep+` / `$($name)sep?` Rust-style repetition syntax (ast-grep uses `$$$NAME` which doesn't capture the separator) — this is genuinely novel
+- A dedicated `insert-before` / `insert-after` command — useful for wrapping or logging instrumentation
+- Slightly smaller binary (~3MB vs ~10MB)
+- No config files, no YAML, no subcommands beyond the 5 operations — just `patchwork find|replace|delete|insert-before|insert-after`
+- `$lowercase` placeholder convention (some prefer this; it's a minor stylistic difference from ast-grep's `$UPPERCASE`)
+
+**What both have:**
+- tree-sitter-based AST matching
+- `$name` single-node wildcards
+- Multi-node repetition (patchwork: `$($name)sep*`, ast-grep: `$$$NAME`)
+- Tree-sitter query mode (`-q` in patchwork, `--query` in ast-grep)
+- `-i` in-place editing
+- Pipe/stdin support
+- CLI-focused design (both are fast Rust binaries)
+
+### So why does patchwork exist?
+
+Two reasons:
+
+1. **The `$($name)sep*` repetition is genuinely better for function arguments.** `$f($($arg,)*)` captures the separator and handles zero/one/many args with a natural Rust-like syntax. ast-grep's `console.log($$$ARGS)` has no separator awareness — if you delete a single arg, you're left with trailing commas.
+
+2. **Vision: a tool that AI agents reach for first.** patchwork aims to be the simplest possible AST editor — so simple that an LLM can generate precise patchwork commands without thinking about YAML config, rule composition, or scanning modes. Whether it achieves this better than `ast-grep -p '...' -r '...'` is an open question, but the design surface is intentionally tiny.
+
+Realistically: if you need a mature, well-documented tool today, use ast-grep. If you're interested in the repetition syntax experiment or want to influence the design of a simpler alternative, watch this space.
 
 ## How it works
 
