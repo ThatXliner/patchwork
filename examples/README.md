@@ -7,7 +7,7 @@ repo root.
 
 ```bash
 cargo run -- replace -i -p 'debug($msg)' -r 'logger.warn($msg)' examples/java/UserService.java
-cargo run -- find -p 'logger.warn($msg)' examples/java/UserService.java
+cargo run -- find -p 'user.$method($($thing),*)' examples/java/UserService.java
 ```
 
 ## Python: remove print debugging
