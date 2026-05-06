@@ -1,62 +1,64 @@
 # patchwork
 
-**AST-aware code editing with tree-sitter — like `sed` but it understands syntax.**
+**AST-aware code refactoring in your terminal.**
 
 ```bash
+# Rename a method across files without false positives
+patchwork replace -i -p 'getOldData($a)' -r 'getData($a)' src/**/*.java
+
+# Replace a logging framework
+patchwork delete -i -p 'logger.debug($msg)' src/*.py
+patchwork insert-before -p 'logger.debug($msg)' --code 'tracing.debug($msg)' src/*.py
+
 # Match by structure, not regex
 patchwork find -p 'return null;' src/
-
-# Replace matched code
-patchwork replace -i -p 'old_func($a, $b)' -r 'new_func($b, $a)' src/*.java
-
-# Delete matched expressions
-patchwork delete -i -p 'debug($msg)' app.py
-
-# Insert relative to structural matches
-patchwork insert-after -p 'System.out.println("done");' --code '\nlogger.info("complete");' App.java
-
-# Or use tree-sitter queries for precise matching
-patchwork find -q '(function_definition name: (identifier) @name)' src/*.py
 ```
 
-## Why
+## The problem
 
-- **`sed`/`grep`** are line-based and break on multi-line statements, nested brackets, or string literals containing your pattern.
-- **`semgrep`** is a 200MB+ Python dependency designed for CI scans, not ad-hoc CLI piping.
-- **`fastedit`** is built for AI agents as an MCP server — it uses a 1.7B model for non-trivial edits.
+You want to rename a function, swap an import, or update an API call across a codebase. Your options:
 
-**patchwork** is a single deterministic binary. It parses both your pattern and source code into tree-sitter CSTs, then finds structural matches and applies edits. No model calls, no configuration files, no magic.
+- **`sed`** — the regex might match inside strings or comments, misses multi-line patterns, and breaks on nested brackets. Gets fragile fast.
+- **`semgrep`** — a 200MB+ Python install, designed for CI linting, not for piping through `find | xargs`.
+- **`fastedit`** — optimized for AI coding agents (MCP server), uses a 1.7B model for complex edits, operates at the `function` level.
+
+**patchwork** is a single 3MB binary. It parses both your pattern and source code into tree-sitter CSTs (concrete syntax trees), finds structural matches, and applies edits. No models, no config, no 200MB dependency tree.
 
 ## How it works
 
-Write the code as a snippet (`-p`). It gets parsed into an AST subtree and matched against the source.
+Write a code snippet and patchwork finds structurally identical code in your source.
 
-**Names and values match exactly by default.** `return 1;` only matches `return 1;`, not `return 42;`. Use `$` prefix (like `$x`) to match any value at that position:
+**Names and values match exactly by default** — `return 1;` only matches `return 1;`, not `return 42;`. This means you don't accidentally match code that happens to have the same shape but different identifiers.
 
 ```bash
-# Match specific return value
-patchwork find -p 'return null;' src/
+# Only matches exactly this call
+patchwork find -p 'old_api(x)' src/
 
-# Match any return value
+# Use $ to match any identifier
+patchwork find -p 'old_api($x)' src/
+```
+
+### `$` placeholders
+
+`$name` matches any single AST node — any identifier, literal, or expression. It's like `.*` for code but structure-aware.
+
+```bash
+# Match any call to old_api with any single argument
+patchwork replace -i -p 'old_api($arg)' -r 'new_api($arg)' src/**/*.java
+
+# Match any two-argument call, reorder args in replacement
+patchwork replace -i -p '$f($a, $b)' -r '$f($b, $a)' src/*.py
+
+# Delete all calls to debug regardless of argument
+patchwork delete -i -p 'debug($msg)' src/*.py
+
+# Match any return statement
 patchwork find -p 'return $val;' src/
 ```
 
-`$name` acts as a placeholder that matches any single AST node of any type — identifiers, literals, expressions.
+### Tree-sitter queries
 
-```bash
-# Match any call to any method with value 42
-patchwork replace -i -p 'println(42)' -r 'log(42)' src/*.java
-
-# Match any call to println with any argument
-patchwork replace -i -p 'println($arg)' -r 'log($arg)' src/*.java
-
-# Match any method call with any args
-patchwork delete -i -p '$method($args)' App.java
-```
-
-### Tree-sitter queries (`-q`)
-
-[Tree-sitter S-expression queries](https://tree-sitter.github.io/tree-sitter/using-parsers#query-syntax) for when you need precise structural patterns with named captures.
+For precise structural patterns with named captures:
 
 ```bash
 patchwork replace -q '(if_statement condition: (identifier) @matched)' -r 'check(x)' file.ts
@@ -74,10 +76,6 @@ patchwork replace -q '(if_statement condition: (identifier) @matched)' -r 'check
 
 All editing commands support `-i` (in-place, like `sed -i`) and stdin/stdout piping.
 
-## Language support
-
-Java, Python, JavaScript, TypeScript, and TSX — covered by `tree-sitter-java`, `tree-sitter-python`, `tree-sitter-javascript`, and `tree-sitter-typescript`. Adding a language means adding one crate dependency and one enum arm.
-
 ## Usage
 
 ```bash
@@ -85,13 +83,13 @@ Java, Python, JavaScript, TypeScript, and TSX — covered by `tree-sitter-java`,
 cat Main.java | patchwork find -l java -p 'return null;'
 
 # File mode (language detected from extension)
-patchwork replace -i -p 'catch (Exception $e)' -r 'catch (Exception $e) { log($e); throw; }' src/*.java
+patchwork replace -i -p 'println($arg)' -r 'log($arg)' src/**/*.java
 
 # Query mode
 patchwork find -q '(method_invocation name: (identifier) @name (#eq? @name "println"))' App.java
 
-# Multi-file with filename headers
-patchwork replace -p 'TODO' -r 'FIXME' src/*.rs
+# Multi-file
+patchwork replace -p 'BufferedReader $r' -r 'Reader $r' src/**/*.java
 ```
 
 ## Installation
@@ -108,12 +106,17 @@ cd patchwork
 cargo build --release
 ```
 
-## How is this different from fastedit?
+## Supported languages
 
-Fastedit is an MCP server designed for AI coding agents. Its deterministic mode operates at the **symbol level** (find function `foo`, then line-splice within its body). Complex edits fall back to a 1.7B model. It's not designed for CLI composability — you can't pipe to it or use it in `find | xargs` workflows.
+Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate dependency and a handful of lines.
 
-Patchwork is a CLI tool designed for **you**, not an agent. It matches arbitrary AST nodes (not just named symbols), supports stdin/stdout pipelines, and is fully deterministic. There is no model.
+## Limitations
+
+- **Single-file only** — no cross-file rename tracking or import updates
+- **No AST rewriting** — edits are text-level (replace byte range). The AST is used for matching, not for generating diffs
+- **Formatting** — replacement text isn't auto-indented; include your own whitespace
+- **No model** — this is by design. Complex structural changes that need reasoning aren't supported. For those, use an LLM-based tool
 
 ## Status
 
-Early but functional. 63 tests, one binary, zero config.
+63 tests, one binary, zero config. Early but functional.
