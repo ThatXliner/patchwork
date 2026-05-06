@@ -25,6 +25,25 @@ You want to rename a function, swap an import, or update an API call across a co
 
 **patchwork** is a single 3MB binary that parses both your pattern and source into tree-sitter CSTs, finds structural matches, and applies edits. No models, no config, no Python runtime.
 
+## How it compares
+
+| Tool | Language | Parsing | Size | Languages | Best for |
+|---|---|---|---|---|---|
+| **patchwork** | Rust | tree-sitter AST | ~3MB | 5 | Simple CLI refactors, pipes, `$()*` repetition |
+| [ast-grep](https://github.com/ast-grep/ast-grep) | Rust | tree-sitter AST | ~10MB | 25+ | General refactoring, YAML rules, LSP/VS Code/MCP |
+| [Comby](https://comby.dev) | OCaml | parser-free | ~8MB | ~all | Quick cross-language/text-format replacements |
+| [Semgrep](https://github.com/semgrep/semgrep) | Python | real parsers | 200MB+ | 20+ | Security auditing with taint tracking & dataflow |
+
+**patchwork vs ast-grep** (the closest alternative):
+- patchwork is purely CLI — no YAML rules, no interactive mode, no LSP. A drop-in for `sed` in shell scripts.
+- patchwork's `$($name)sep*` / `$($name)sep+` / `$($name)sep?` Rust-style repetition is unique here.
+- patchwork uses `$lowercase` placeholders (not `$CAPITAL`), which some find more natural.
+- ast-grep has a richer ecosystem — VS Code extension, MCP server, Python/Node bindings — if you need those.
+
+**patchwork vs Comby**: patchwork uses real tree-sitter parsers so it understands language-specific AST structure. Comby is parser-free and works on any language, but with less structural precision.
+
+**patchwork vs Semgrep**: Semgrep is heavy but delivers deep semantic analysis (taint tracking, dataflow). patchwork is for the 80% case: quick, correct structural edits that finish before your coffee gets cold.
+
 ## How it works
 
 Write a code snippet and patchwork finds structurally identical code in your source.
