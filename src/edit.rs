@@ -67,6 +67,7 @@ pub fn apply_edits(source: &str, edits: &[Edit]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use tree_sitter::Point;
     use super::*;
 
     #[test]
@@ -128,23 +129,143 @@ mod tests {
 
     #[test]
     fn test_insert_before() {
-        let source = "b";
         let edits = vec![Edit {
             start_byte: 0,
             end_byte: 0,
             replacement: "a".into(),
         }];
-        assert_eq!(apply_edits(source, &edits).unwrap(), "ab");
+        assert_eq!(apply_edits("b", &edits).unwrap(), "ab");
     }
 
     #[test]
     fn test_insert_after() {
-        let source = "a";
         let edits = vec![Edit {
             start_byte: 1,
             end_byte: 1,
             replacement: "b".into(),
         }];
-        assert_eq!(apply_edits(source, &edits).unwrap(), "ab");
+        assert_eq!(apply_edits("a", &edits).unwrap(), "ab");
+    }
+
+    #[test]
+    fn test_empty_source() {
+        let edits = vec![Edit {
+            start_byte: 0,
+            end_byte: 0,
+            replacement: "hello".into(),
+        }];
+        assert_eq!(apply_edits("", &edits).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_replace_longer() {
+        let edits = vec![Edit {
+            start_byte: 0,
+            end_byte: 1,
+            replacement: "abc".into(),
+        }];
+        assert_eq!(apply_edits("x", &edits).unwrap(), "abc");
+    }
+
+    #[test]
+    fn test_replace_shorter() {
+        let edits = vec![Edit {
+            start_byte: 0,
+            end_byte: 3,
+            replacement: "x".into(),
+        }];
+        assert_eq!(apply_edits("abc", &edits).unwrap(), "x");
+    }
+
+    #[test]
+    fn test_multiple_non_overlapping() {
+        let edits = vec![
+            Edit {
+                start_byte: 6,
+                end_byte: 11,
+                replacement: "there".into(),
+            },
+            Edit {
+                start_byte: 0,
+                end_byte: 5,
+                replacement: "hi".into(),
+            },
+        ];
+        assert_eq!(apply_edits("hello world", &edits).unwrap(), "hi there");
+    }
+
+    #[test]
+    fn test_two_inserts_same_position() {
+        let edits = vec![
+            Edit {
+                start_byte: 0,
+                end_byte: 0,
+                replacement: "b".into(),
+            },
+            Edit {
+                start_byte: 0,
+                end_byte: 0,
+                replacement: "a".into(),
+            },
+        ];
+        let result = apply_edits("", &edits).unwrap();
+        assert_eq!(result, "ab");
+    }
+
+    #[test]
+    fn test_utf8_multi_byte() {
+        let edits = vec![Edit {
+            start_byte: 3,
+            end_byte: 4,
+            replacement: "ñ".into(),
+        }];
+        // "héllo": h=0, é=1-2, l=3, l=4, o=5
+        // Replace byte 3..4 (first 'l') with "ñ" → "héñlo"
+        assert_eq!(apply_edits("héllo", &edits).unwrap(), "héñlo");
+    }
+
+    #[test]
+    fn test_no_edits() {
+        assert_eq!(apply_edits("hello", &[]).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_insert_at_end() {
+        let edits = vec![Edit {
+            start_byte: 5,
+            end_byte: 5,
+            replacement: "!".into(),
+        }];
+        assert_eq!(apply_edits("hello", &edits).unwrap(), "hello!");
+    }
+
+    #[test]
+    fn test_matches_to_edits_replace() {
+        let m = Match {
+            start_byte: 0,
+            end_byte: 5,
+            start_point: Point { row: 0, column: 0 },
+            end_point: Point { row: 0, column: 5 },
+        };
+        let edits = matches_to_edits(&[m], &Operation::Replace("hi".into()));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start_byte, 0);
+        assert_eq!(edits[0].end_byte, 5);
+        assert_eq!(edits[0].replacement, "hi");
+    }
+
+    #[test]
+    fn test_matches_to_edits_delete() {
+        let m = Match {
+            start_byte: 1,
+            end_byte: 4,
+            start_point: Point { row: 0, column: 1 },
+            end_point: Point { row: 0, column: 4 },
+        };
+        let edits = matches_to_edits(&[m], &Operation::Delete);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start_byte, 1);
+        assert_eq!(edits[0].end_byte, 4);
+        assert_eq!(edits[0].replacement, "");
     }
 }

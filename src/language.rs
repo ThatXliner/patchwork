@@ -69,4 +69,26 @@ mod tests {
         assert!(matches!(Lang::from_name("ts"), Some(Lang::TypeScript)));
         assert!(Lang::from_name("ruby").is_none());
     }
+
+    #[test]
+    fn test_additional_extensions() {
+        assert!(matches!(Lang::from_extension("test.jsx"), Some(Lang::JavaScript)));
+        assert!(matches!(Lang::from_extension("test.mjs"), Some(Lang::JavaScript)));
+        assert!(matches!(Lang::from_extension("test.cjs"), Some(Lang::JavaScript)));
+    }
+
+    #[test]
+    fn test_grammar_loads() {
+        for lang in &[Lang::Java, Lang::Python, Lang::JavaScript] {
+            let grammar = lang.grammar();
+            let mut p = tree_sitter::Parser::new();
+            assert!(p.set_language(&grammar).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_case_insensitive_extension() {
+        assert!(matches!(Lang::from_extension("TEST.JAVA"), Some(Lang::Java)));
+        assert!(matches!(Lang::from_extension("Test.Py"), Some(Lang::Python)));
+    }
 }

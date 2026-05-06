@@ -9,10 +9,15 @@ pub struct Match {
     pub end_point: Point,
 }
 
+fn is_root_wrapper(kind: &str) -> bool {
+    matches!(kind, "program" | "module")
+}
+
 /// Extract the meaningful pattern node from a parsed snippet tree.
-/// Skips the `program` wrapper if the snippet is a single expression/statement.
+/// Skips the root wrapper (program/module) if the snippet is a single
+/// top-level construct.
 fn extract_pattern(root: Node) -> Option<Node> {
-    if root.kind() == "program" && root.named_child_count() == 1 {
+    if is_root_wrapper(root.kind()) && root.named_child_count() == 1 {
         root.named_child(0)
     } else {
         Some(root)
@@ -196,6 +201,16 @@ mod tests {
         tree_sitter_java::LANGUAGE.into()
     }
 
+    fn python_lang() -> Language {
+        tree_sitter_python::LANGUAGE.into()
+    }
+
+    fn js_lang() -> Language {
+        tree_sitter_javascript::LANGUAGE.into()
+    }
+
+    // ——— snippet matching ———
+
     #[test]
     fn test_same_kind_leaves_match() {
         let source = "class A { void f() { return 1; } }";
@@ -205,7 +220,6 @@ mod tests {
 
     #[test]
     fn test_leaf_value_ignored() {
-        // Structural match — same structure, different literal
         let source = "class A { void f() { return 42; } }";
         let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
         assert_eq!(matches.len(), 1);
@@ -241,11 +255,150 @@ class A {
     }
 
     #[test]
+    fn test_empty_source_no_match() {
+        let matches = find_snippet_matches("", "return 1;", &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_matches() {
+        let source = r#"
+class A {
+    void f() { return 1; }
+    void g() { return 2; }
+    void h() { return 3; }
+}"#;
+        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn test_snippet_error_returns_err() {
+        let result = find_snippet_matches("class A {}", "return ", &java_lang());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deeply_nested_match() {
+        let source = r#"
+class Outer {
+    class Inner {
+        void f() {
+            if (true) {
+                return 1;
+            }
+        }
+    }
+}"#;
+        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_byte_ranges_correct() {
+        let source = "class A { int x; void f() { return 1; } }";
+        let matches = find_snippet_matches(source, "return 1;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        let matched_text = &source[m.start_byte..m.end_byte];
+        assert_eq!(matched_text, "return 1;");
+    }
+
+    // ——— Python snippet matching ———
+
+    #[test]
+    fn test_python_snippet_match() {
+        let source = "x = 42\n";
+        let matches = find_snippet_matches(source, "x = 1", &python_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        // The match may include trailing newline; check it starts correctly
+        assert!(matches[0].end_byte >= 6);
+        assert!(source[matches[0].start_byte..].starts_with("x = 42"));
+    }
+
+    #[test]
+    fn test_python_multiple_matches() {
+        let source = "a = 1\nb = 2\n";
+        let matches = find_snippet_matches(source, "a = 1", &python_lang()).unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_python_no_match() {
+        let source = "def f():\n    pass\n";
+        let matches = find_snippet_matches(source, "return 1", &python_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    // ——— JavaScript snippet matching ———
+
+    #[test]
+    fn test_js_snippet_match() {
+        let source = "function f() { return 42; }";
+        let matches = find_snippet_matches(source, "return 1;", &js_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_js_no_match() {
+        let source = "const x = 1;";
+        let matches = find_snippet_matches(source, "return 1;", &js_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    // ——— query matching ———
+
+    #[test]
     fn test_query_find() {
         let source = "class A { void f() { return 42; } }";
-        // Match all return statements
         let matches =
             find_query_matches(source, "(return_statement) @matched", &java_lang()).unwrap();
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_query_no_matches() {
+        let source = "class A { void f() { return 42; } }";
+        let matches =
+            find_query_matches(source, "(if_statement) @matched", &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_query_prefers_matched_capture() {
+        let source = "class A { void f() { return 42; } }";
+        // Query captures a method_declaration's identifier — should use @matched
+        let matches = find_query_matches(
+            source,
+            "(method_declaration name: (identifier) @matched)",
+            &java_lang(),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(&source[matches[0].start_byte..matches[0].end_byte], "f");
+    }
+
+    #[test]
+    fn test_query_syntax_error() {
+        let result = find_query_matches("class A {}", "((", &java_lang());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_python_query() {
+        let source = "def f():\n    return 42\n";
+        let matches =
+            find_query_matches(source, "(return_statement) @matched", &python_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    // ——— structurally_matches ———
+
+    #[test]
+    fn test_structurally_matches_fails_on_kind_mismatch() {
+        // An if-statement doesn't match a return statement
+        let source = "class A { void f() { return 1; } }";
+        let matches = find_snippet_matches(source, "if (true) {}", &java_lang()).unwrap();
+        assert!(matches.is_empty());
     }
 }
