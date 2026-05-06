@@ -8,6 +8,9 @@ pub struct Match {
     pub start_point: Point,
     #[allow(dead_code)]
     pub end_point: Point,
+    /// Placeholder captures from snippet matching.
+    /// Maps `$name` → the source text it matched.
+    pub captures: HashMap<String, String>,
 }
 
 fn is_root_wrapper(kind: &str) -> bool {
@@ -50,6 +53,12 @@ fn leaf_matches(source_text: &str, pattern_text: &str, s_node: Node, p_node: Nod
     p == s
 }
 
+/// Build reverse map from sentinel identifier to placeholder name.
+/// `{"msg": "_pw_1"}` → `{"_pw_1": "msg"}`
+fn reverse_placeholder_map(placeholders: &HashMap<String, String>) -> HashMap<String, String> {
+    placeholders.iter().map(|(k, v)| (v.clone(), k.clone())).collect()
+}
+
 /// Check if a pattern node is a `$` placeholder (a bare `_pw_N` identifier).
 fn is_placeholder(pattern_node: Node, pattern_text: &str) -> bool {
     if !pattern_node.is_named() || pattern_node.named_child_count() != 0 {
@@ -69,9 +78,16 @@ pub fn structurally_matches(
     pattern_node: Node,
     source_text: &str,
     pattern_text: &str,
+    captures: &mut HashMap<String, String>,
+    reverse_placeholders: &HashMap<String, String>,
 ) -> bool {
     // A $ placeholder matches any single source node (any kind, any text)
     if is_placeholder(pattern_node, pattern_text) {
+        let sentinel = &pattern_text[pattern_node.start_byte()..pattern_node.end_byte()];
+        if let Some(name) = reverse_placeholders.get(sentinel) {
+            let matched = &source_text[source_node.start_byte()..source_node.end_byte()];
+            captures.insert(name.clone(), matched.to_string());
+        }
         return true;
     }
 
@@ -102,7 +118,7 @@ pub fn structurally_matches(
         let Some(s_child) = source_node.named_child(i as u32) else {
             return false;
         };
-        if !structurally_matches(s_child, p_child, source_text, pattern_text) {
+        if !structurally_matches(s_child, p_child, source_text, pattern_text, captures, reverse_placeholders) {
             return false;
         }
     }
@@ -117,20 +133,23 @@ fn collect_matches(
     matches: &mut Vec<Match>,
     source_text: &str,
     pattern_text: &str,
+    reverse_placeholders: &HashMap<String, String>,
 ) {
     let node = cursor.node();
-    if structurally_matches(node, pattern, source_text, pattern_text) {
+    let mut captures = HashMap::new();
+    if structurally_matches(node, pattern, source_text, pattern_text, &mut captures, reverse_placeholders) {
         matches.push(Match {
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
             start_point: node.start_position(),
             end_point: node.end_position(),
+            captures,
         });
     }
 
     if cursor.goto_first_child() {
         loop {
-            collect_matches(cursor, pattern, matches, source_text, pattern_text);
+            collect_matches(cursor, pattern, matches, source_text, pattern_text, reverse_placeholders);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -191,7 +210,8 @@ pub fn find_snippet_matches(
     snippet: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let (pattern_text, _placeholders) = preprocess_snippet(snippet);
+    let (pattern_text, placeholders) = preprocess_snippet(snippet);
+    let reverse_ph = reverse_placeholder_map(&placeholders);
 
     let mut parser = Parser::new();
     parser
@@ -214,7 +234,7 @@ pub fn find_snippet_matches(
 
     let mut matches = Vec::new();
     let mut cursor = source_tree.root_node().walk();
-    collect_matches(&mut cursor, pattern, &mut matches, source, &pattern_text);
+    collect_matches(&mut cursor, pattern, &mut matches, source, &pattern_text, &reverse_ph);
     Ok(matches)
 }
 
@@ -264,6 +284,7 @@ pub fn find_query_matches(
             end_byte: node.end_byte(),
             start_point: node.start_position(),
             end_point: node.end_position(),
+            captures: HashMap::new(),
         });
     }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::matcher::Match;
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,41 @@ pub enum Operation {
     InsertAfter(String),
 }
 
+/// Substitute `$name` references in `template` with values from `captures`.
+/// Unknown `$name` is left as-is.
+fn substitute_captures(template: &str, captures: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.char_indices().peekable();
+
+    while let Some((_, c)) = chars.next() {
+        if c == '$' {
+            if let Some(&(_, next)) = chars.peek() {
+                if next.is_ascii_alphabetic() || next == '_' {
+                    let mut name = String::new();
+                    while let Some(&(_, c)) = chars.peek() {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            name.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(value) = captures.get(&name) {
+                        result.push_str(value);
+                    } else {
+                        result.push('$');
+                        result.push_str(&name);
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+    }
+
+    result
+}
+
 /// Convert matched locations into edits for the given operation.
 pub fn matches_to_edits(matches: &[Match], op: &Operation) -> Vec<Edit> {
     matches
@@ -22,7 +58,7 @@ pub fn matches_to_edits(matches: &[Match], op: &Operation) -> Vec<Edit> {
             Operation::Replace(replacement) => Edit {
                 start_byte: m.start_byte,
                 end_byte: m.end_byte,
-                replacement: replacement.clone(),
+                replacement: substitute_captures(replacement, &m.captures),
             },
             Operation::Delete => Edit {
                 start_byte: m.start_byte,
@@ -67,6 +103,7 @@ pub fn apply_edits(source: &str, edits: &[Edit]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use tree_sitter::Point;
     use super::*;
 
@@ -246,6 +283,7 @@ mod tests {
             end_byte: 5,
             start_point: Point { row: 0, column: 0 },
             end_point: Point { row: 0, column: 5 },
+            captures: HashMap::new(),
         };
         let edits = matches_to_edits(&[m], &Operation::Replace("hi".into()));
         assert_eq!(edits.len(), 1);
@@ -261,11 +299,59 @@ mod tests {
             end_byte: 4,
             start_point: Point { row: 0, column: 1 },
             end_point: Point { row: 0, column: 4 },
+            captures: HashMap::new(),
         };
         let edits = matches_to_edits(&[m], &Operation::Delete);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].start_byte, 1);
         assert_eq!(edits[0].end_byte, 4);
         assert_eq!(edits[0].replacement, "");
+    }
+
+    #[test]
+    fn test_substitute_captures_basic() {
+        let mut caps = HashMap::new();
+        caps.insert("msg".into(), "\"hello\"".into());
+        assert_eq!(substitute_captures("warn($msg)", &caps), "warn(\"hello\")");
+    }
+
+    #[test]
+    fn test_substitute_captures_multiple() {
+        let mut caps = HashMap::new();
+        caps.insert("f".into(), "foo".into());
+        caps.insert("a".into(), "1".into());
+        caps.insert("b".into(), "2".into());
+        assert_eq!(
+            substitute_captures("$f($b, $a)", &caps),
+            "foo(2, 1)"
+        );
+    }
+
+    #[test]
+    fn test_substitute_captures_unknown_kept_as_is() {
+        let caps = HashMap::new();
+        assert_eq!(substitute_captures("warn($msg)", &caps), "warn($msg)");
+    }
+
+    #[test]
+    fn test_substitute_captures_no_dollar() {
+        let caps = HashMap::new();
+        assert_eq!(substitute_captures("hello world", &caps), "hello world");
+    }
+
+    #[test]
+    fn test_matches_to_edits_with_captures() {
+        let mut caps = HashMap::new();
+        caps.insert("msg".into(), "\"hello\"".into());
+        let m = Match {
+            start_byte: 24,
+            end_byte: 42,
+            start_point: Point { row: 2, column: 0 },
+            end_point: Point { row: 2, column: 18 },
+            captures: caps,
+        };
+        let edits = matches_to_edits(&[m], &Operation::Replace("warn($msg)".into()));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].replacement, "warn(\"hello\")");
     }
 }
