@@ -182,7 +182,7 @@ Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate depend
 ## Limitations
 
 - **Single-file only** — no cross-file rename tracking or import updates
-- **Formatting** — replacement text isn't auto-indented; include your own whitespace
+- **Formatting** — replacement text isn't auto-indented; include your own whitespace. This also means we don't really support Python
 - **`$$$name` in blocks** — `$$$name` doesn't match statements inside blocks due to tree-sitter's `expression_statement` wrappers. Use `$BODY` instead
 - **No model** — this is by design. Complex structural changes that need reasoning aren't supported. For those, use an LLM-based tool
 
