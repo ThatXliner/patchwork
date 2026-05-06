@@ -68,12 +68,12 @@ pub fn matches_to_edits(matches: &[Match], op: &Operation) -> Vec<Edit> {
             Operation::InsertBefore(code) => Edit {
                 start_byte: m.start_byte,
                 end_byte: m.start_byte,
-                replacement: code.clone(),
+                replacement: substitute_captures(code, &m.captures),
             },
             Operation::InsertAfter(code) => Edit {
                 start_byte: m.end_byte,
                 end_byte: m.end_byte,
-                replacement: code.clone(),
+                replacement: substitute_captures(code, &m.captures),
             },
         })
         .collect()

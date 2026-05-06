@@ -1,6 +1,22 @@
 use std::io::Write;
 use std::process::Command;
 
+/// Helper to create a temp Java file with content, run an op, and check output.
+fn with_temp_java_file<F>(content: &str, f: F) -> String
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    let dir = std::env::temp_dir().join(format!("patchwork_file_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("Temp.java");
+    std::fs::write(&file_path, content).unwrap();
+    // Run with the temp file (language auto-detected from .java extension)
+    let result = f(file_path.to_str().unwrap());
+    let output = result.unwrap_or_else(|e| panic!("op failed: {}", e));
+    let _ = std::fs::remove_dir_all(&dir);
+    output
+}
+
 fn patchwork() -> Command {
     Command::new(env!("CARGO_BIN_EXE_patchwork"))
 }
@@ -136,4 +152,84 @@ fn test_no_pattern_or_query_fails() {
 fn test_in_place_requires_files() {
     let result = run_pipe(&["replace", "-i", "-l", "java", "-p", "x", "-r", "y"], "class A {}");
     assert!(result.is_err());
+}
+
+// ——— README demo commands ———
+
+#[test]
+fn test_replace_with_placeholder_substitution() {
+    // patchwork replace -i -p 'getOldData($a)' -r 'getData($a)' src/**/*.java
+    let out = run_pipe(
+        &["replace", "-l", "java", "-p", "getOldData($a)", "-r", "getData($a)"],
+        "class A { void f() { getOldData(x); } }",
+    )
+    .unwrap();
+    assert!(out.contains("getData(x)"));
+    assert!(!out.contains("getOldData(x)"));
+}
+
+#[test]
+fn test_replace_arg_reorder() {
+    // patchwork replace -i -p '$f($a, $b)' -r '$f($b, $a)' src/*.py
+    let out = run_pipe(
+        &["replace", "-l", "python", "-p", "$f($a, $b)", "-r", "$f($b, $a)"],
+        "foo(1, 2)\n",
+    )
+    .unwrap();
+    assert!(out.contains("foo(2, 1)"));
+}
+
+#[test]
+fn test_insert_before_with_placeholder() {
+    // patchwork insert-before -p 'logger.debug($msg)' --code 'tracing.debug($msg)' src/*.py
+    let out = run_pipe(
+        &["insert-before", "-l", "java", "-p", "debug($msg)", "--code", "tracing.debug($msg)"],
+        "class A { void f() { debug(x); } }",
+    )
+    .unwrap();
+    assert!(out.contains("tracing.debug(x)"));
+    assert!(out.contains("debug(x)"));
+}
+
+#[test]
+fn test_insert_after_with_placeholder() {
+    // Symmetric to insert-before: --code with $name substitution
+    let out = run_pipe(
+        &["insert-after", "-l", "java", "-p", "debug($msg)", "--code", "warn($msg)"],
+        "class A { void f() { debug(x); } }",
+    )
+    .unwrap();
+    assert!(out.contains("warn(x)"));
+}
+
+#[test]
+fn test_delete_with_placeholder() {
+    // patchwork delete -i -p 'debug($msg)' src/*.py
+    let out = run_pipe(
+        &["delete", "-l", "java", "-p", "debug($msg)"],
+        "class A { void f() { debug(x); } }",
+    )
+    .unwrap();
+    assert!(!out.contains("debug(x)"));
+}
+
+#[test]
+fn test_replace_stdout_file_mode() {
+    // patchwork replace -p 'BufferedReader $r' -r 'Reader $r' src/**/*.java
+    let out = with_temp_java_file("class A { void f() { BufferedReader br; } }", |path| {
+        run_with_args(&["replace", "-p", "BufferedReader $r", "-r", "Reader $r", path])
+    });
+    assert!(out.contains("Reader br"));
+    assert!(!out.contains("BufferedReader br"));
+}
+
+#[test]
+fn test_find_with_placeholder() {
+    // patchwork find -p 'return $val;' src/
+    let out = run_pipe(
+        &["find", "-l", "java", "-p", "return $val;"],
+        "class A { int f() { return 42; } }",
+    )
+    .unwrap();
+    assert!(out.contains("return 42;"));
 }
