@@ -25,14 +25,11 @@ patchwork find -p 'return null;' src/
 
 More examples are available in the [examples](examples/README.md) directory.
 
-## The problem
+## Motivation
 
-You want to rename a function, swap an import, or update an API call across a codebase. Your options:
+Most code transformation tools sit at extremes. Regex-based tools (`sed`) are fragile across multi-line patterns and nested syntax. Full-featured linters (`semgrep`, `ast-grep`) require config files, YAML rules, or heavy runtimes — overkill for the common case of "find this pattern, change it."
 
-- **`sed`** — the regex might match inside strings or comments, misses multi-line patterns, and breaks on nested brackets. Gets fragile fast.
-- **`semgrep`** — a 200MB+ Python install, designed for CI linting, not for piping through `find | xargs`.
-
-**patchwork** is a single 3MB binary that parses both your pattern and source into tree-sitter CSTs, finds structural matches, and applies edits. No models, no config, no Python runtime.
+**patchwork** is for the middle ground: structural search and replace that runs as a single `find | xargs` pipeline. Zero config, zero setup, one 3MB binary.
 
 ## How it compares
 
