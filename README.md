@@ -44,13 +44,13 @@ Most code transformation tools sit at extremes. Regex-based tools (`sed`) are fr
 
 **patchwork is built for scripts.** Default output is intentionally boring (just `file:line:col`) because it's trivial to `cut`, `xargs`, or pipe into other tools. No config files, no YAML, no rule system — five flat commands with sed-like flags. If the only thing between your `find` and your edit is a tool that needs a config file, you reach for something else.
 
-**patchwork aims for more expressive matching.** The `$($name)sep*` repetition syntax (Rust-style, separator-aware) is the first step. We have `$BODY`/`$STMT`/`$EXPR` special tokens, a dedicated `insert-before`/`insert-after` command, and more matching logic planned — things that go beyond what a YAML rule system enables.
+**patchwork aims for more expressive matching.** The [Rust-style repetition syntax](#advanced-patterns) is the first step. We have `$BODY`/`$STMT`/`$EXPR` special tokens, a dedicated `insert-before`/`insert-after` command, and more matching logic planned — things that go beyond what a YAML rule system enables.
 
 ### So why does patchwork exist?
 
 Two reasons:
 
-1. **The `$($name)sep*` repetition is genuinely better for function arguments.** `$f($($arg,)*)` captures the separator and handles zero/one/many args with a natural Rust-like syntax. ast-grep's `console.log($$$ARGS)` has no separator awareness — if you delete a single arg, you're left with trailing commas.
+1. **The [Rust-style repetition](#advanced-patterns) makes this tool similarly powerful as regex.** `$f($($arg,)*)` captures the separator and handles zero/one/many args with a natural Rust macro-like syntax. ast-grep's `console.log($$$ARGS)` has no separator awareness — if you delete a single arg, you're left with trailing commas.
 
 2. **Vision: a tool that AI agents reach for first.** patchwork aims to be the simplest possible AST editor — so simple that an LLM can generate precise patchwork commands without thinking about YAML config, rule composition, or scanning modes. Whether it achieves this better than `ast-grep -p '...' -r '...'` is an open question, but the design surface is intentionally tiny.
 
@@ -88,20 +88,6 @@ patchwork delete -i -p 'debug($msg)' src/*.py
 patchwork find -p 'return $val;' src/
 ```
 
-### Multi-node repetition
-
-Match zero or more consecutive children at any position:
-
-```bash
-# Match any method call with any number of arguments
-patchwork find -p '$fn($$$args);' src/
-
-# Match all method calls on users (size(), get(id), remove(id))
-patchwork find -p 'users.$$$($($arg,)*);' src/
-```
-
-`$($name)sep*` matches repetitions at the last child position (Rust macro syntax). `$$$name` matches at any position (ast-grep compatible).
-
 ### Special tokens
 
 Pre-defined shortcuts for common patterns:
@@ -112,7 +98,7 @@ Pre-defined shortcuts for common patterns:
 | `$STMT` | A single statement of any kind | `$STMT` matches `return 42;`, `if (x) {}`, etc. |
 | `$EXPR` | A single expression | `debug($EXPR);` matches `debug(x)`, `debug(f())` |
 
-`$BODY` is statement-aware — it works where `$$$name` doesn't because tree-sitter wraps bare identifiers in `expression_statement` nodes inside blocks. Use it to match arbitrary if/while/for bodies:
+`$BODY` is statement-aware — it works where `$$$name` (see [Advanced Patterns](#advanced-patterns)) doesn't because tree-sitter wraps bare identifiers in `expression_statement` nodes inside blocks. Use it to match arbitrary if/while/for bodies:
 
 ```bash
 # Find all if statements regardless of body
@@ -180,8 +166,53 @@ Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate depend
 
 - **Single-file only** — no cross-file rename tracking or import updates
 - **Formatting** — replacement text isn't auto-indented; include your own whitespace. This also means we don't really support Python
-- **`$$$name` in blocks** — `$$$name` doesn't match statements inside blocks due to tree-sitter's `expression_statement` wrappers. Use `$BODY` instead
+- **`$$$name` in blocks** — `$$$name` (see [Advanced Patterns](#advanced-patterns)) doesn't match statements inside blocks due to tree-sitter's `expression_statement` wrappers. Use `$BODY` instead
 - **No model** — this is by design. Complex structural changes that need reasoning aren't supported. For those, use an LLM-based tool
+
+## Advanced Patterns
+
+### Rust-style repetition: `$($name)sep*`
+
+Inspired by [Rust macro repetition syntax](https://doc.rust-lang.org/reference/macros-by-example.html#repetitions), `$($name)sep*` matches repeated patterns with separators — like function arguments or array elements.
+
+```
+pattern:    $f($($arg,)*)
+matches:    f(a, b, c)    → captures $arg as a, b, c
+            f()            → zero matches (allowed by *)
+            f(a)           → captures $arg as a
+```
+
+The `$(...)` group wraps: an inner match pattern (`$arg`), a separator (`,`), and a quantifier (`*` = zero-or-more, `+` = one-or-more). The group must be at the **last child position** in your pattern.
+
+**Why separator awareness matters:** `$$$args` captures `a, b, c` as one blob — remove one element and you're cleaning up commas by hand. `$($arg,)*` tracks each `$arg` independently, so the tool handles delimiters correctly.
+
+```bash
+# Match function calls with any number of arguments
+patchwork find -p '$f($($arg,)*);' src/
+
+# Match array literals
+patchwork find -p '[$($elem,)*]' src/
+```
+
+### `$$$name` — position-independent catch-all
+
+`$$$name` matches zero or more consecutive child nodes at **any position**. No separator tracking — it captures raw text.
+
+```bash
+# Match any method call with any number of arguments
+patchwork find -p '$fn($$$args);' src/
+
+# Match property chains
+patchwork find -p 'users.$$$;' src/
+```
+
+### Which to use
+
+| Pattern | Position | Separator-aware | Best for |
+|---------|----------|-----------------|----------|
+| `$($name)sep*` | Last child only | Yes | Function args, array elements, delimited lists |
+| `$$$name` | Any position | No | Method chains, arbitrary consecutive children |
+| `$BODY` | Block body | N/A | Statements inside `{ }` |
 
 ## Status
 
