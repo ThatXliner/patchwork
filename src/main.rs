@@ -87,10 +87,8 @@ fn get_matches(
 fn resolve_lang(lang_opt: &Option<String>, file: Option<&str>) -> Result<Lang, String> {
     if let Some(name) = lang_opt {
         Lang::from_name(name).ok_or_else(|| {
-            format!(
-                "Unknown language '{}'. Supported: java, python, js, ts, tsx",
-                name
-            )
+            let supported: Vec<&str> = Lang::all().iter().map(|l| l.name()).collect();
+            format!("Unknown language '{}'. Supported: {}", name, supported.join(", "))
         })
     } else if let Some(path) = file {
         Lang::from_extension(path).ok_or_else(|| {

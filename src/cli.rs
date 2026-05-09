@@ -7,7 +7,7 @@ pub struct Cli {
         short = 'l',
         long = "language",
         global = true,
-        help = "Force language (java, python, js, ts, tsx)"
+        help = "Force language (java, python, js, ts, tsx, rust, go, ruby, c, cpp, csharp, php, bash)"
     )]
     pub language: Option<String>,
 

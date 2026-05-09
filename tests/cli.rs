@@ -43,12 +43,9 @@ fn run_pipe(args: &[&str], input: &str) -> Result<String, String> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // Ignore write errors (e.g. BrokenPipe) — the process may exit before
+    // reading stdin if the error is detected before input is consumed.
+    let _ = child.stdin.as_mut().unwrap().write_all(input.as_bytes());
     let output = child.wait_with_output().unwrap();
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())

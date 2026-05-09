@@ -37,7 +37,7 @@ Most code transformation tools sit at extremes. Regex-based tools (`sed`) are fr
 
 | Tool | Language | Parsing | Size | Languages | Maturity |
 |---|---|---|---|---|---|
-| **patchwork** | Rust | tree-sitter AST | ~3MB | 5 | Alpha — one person, <1yr |
+| **patchwork** | Rust | tree-sitter AST | ~5MB | 13 | Alpha — one person, <1yr |
 | [ast-grep](https://github.com/ast-grep/ast-grep) | Rust | tree-sitter AST | ~10MB | 25+ | Mature — 174 releases, active community |
 | [Comby](https://comby.dev) | OCaml | parser-free | ~8MB | ~all | Mature |
 | [Semgrep](https://github.com/semgrep/semgrep) | Python | real parsers | 200MB+ | 20+ | Mature — enterprise security product |
@@ -160,7 +160,7 @@ cargo build --release
 
 ## Supported languages
 
-Java, Python, JavaScript, TypeScript, TSX. Adding a language is one crate dependency and a handful of lines.
+Java, Python, JavaScript, TypeScript, TSX, Rust, Go, Ruby, C, C++, C#, PHP, Bash. Adding a language is one crate dependency and a handful of lines.
 
 ## Limitations
 
