@@ -142,6 +142,7 @@ patchwork replace -q '(if_statement condition: (identifier) @matched)' -r 'check
 | `delete` | Remove matched code |
 | `insert-before` | Insert code before each match |
 | `insert-after` | Insert code after each match |
+| `nodes` | List available tree-sitter node kinds for a language |
 
 All editing commands support `-i` (in-place, like `sed -i`) and stdin/stdout piping.
 
@@ -159,6 +160,11 @@ patchwork find -q '(method_invocation name: (identifier) @name (#eq? @name "prin
 
 # Multi-file
 patchwork replace -p 'BufferedReader $r' -r 'Reader $r' src/**/*.java
+
+# List available tree-sitter node kinds for a language (discover $name:Kind options)
+patchwork nodes java
+patchwork nodes python
+patchwork nodes java --all    # include anonymous nodes (punctuation, operators)
 ```
 
 ## Installation
@@ -223,11 +229,30 @@ patchwork find -p '$fn($$$args);' src/
 patchwork find -p 'users.$$$;' src/
 ```
 
+### Multi-item repetition groups: `$($a, $b)sep*`
+
+Like Rust macros, `$(...)` can contain **multiple** `$name` placeholders to match repeated compound patterns:
+
+```
+pattern:    $f($($key, $val),*)
+matches:    f(x, 1, y, 2, z, 3)    → captures $key as "xyz", $val as "123"
+            f()                     → zero groups, both captures empty
+            f(a, 0)                 → single group, $key="a", $val="0"
+```
+
+Each group of source children is matched against the placeholders in order. Each placeholder captures the concatenated text of its position across all groups.
+
+```bash
+# Match flat key-value pairs in function arguments
+patchwork find -p '$f($($key, $val),*);' src/
+```
+
 ### Which to use
 
 | Pattern | Position | Separator-aware | Best for |
 |---------|----------|-----------------|----------|
-| `$($name)sep*` | Last child only | Yes | Function args, array elements, delimited lists |
+| `$($name)sep*` | Last child only | Yes | Single repeated element (args, array items) |
+| `$($a, $b)sep*` | Last child only | Yes | Repeated compound patterns (key-value pairs, binary ops) |
 | `$$$name` | Any position | No | Method chains, arbitrary consecutive children |
 | `$BODY` | Block body | N/A | Statements inside `{ }` |
 

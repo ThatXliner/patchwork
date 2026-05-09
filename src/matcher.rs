@@ -30,6 +30,10 @@ pub(crate) struct RepetitionInfo {
     /// Repetition operator: "*", "+", or "?"
     op: String,
     pub(crate) kind: RepetitionKind,
+    /// Sub-pattern sentinel order for multi-item repetition groups.
+    /// E.g. for `$($a + $b),*`, `sub_sentinels = ["_pw_a", "_pw_b"]`.
+    /// Empty for single-item `$($name)sep*` (backwards compatible).
+    sub_sentinels: Vec<String>,
 }
 
 /// Pre-defined special placeholder tokens that match by node role
@@ -219,15 +223,53 @@ fn structurally_matches(
             }
         }
 
-        if matched_count > 0 {
-            if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
-                let first = source_node.named_child(fixed as u32).unwrap();
-                let last = source_node.named_child((source_named - 1) as u32).unwrap();
-                let text = &ctx.source_text[first.start_byte()..last.end_byte()];
-                captures.insert(name.clone(), text.to_string());
+        if rep.sub_sentinels.is_empty() {
+            // Single-item: existing behavior
+            if matched_count > 0 {
+                if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
+                    let first = source_node.named_child(fixed as u32).unwrap();
+                    let last = source_node.named_child((source_named - 1) as u32).unwrap();
+                    let text = &ctx.source_text[first.start_byte()..last.end_byte()];
+                    captures.insert(name.clone(), text.to_string());
+                }
+            } else if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
+                captures.insert(name.clone(), String::new());
             }
-        } else if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
-            captures.insert(name.clone(), String::new());
+        } else {
+            // Multi-item: group source children by sub-pattern size
+            let group_size = rep.sub_sentinels.len();
+            if matched_count % group_size != 0 {
+                return false;
+            }
+            let num_groups = matched_count / group_size;
+            if num_groups == 0 {
+                // Zero matches: capture empty strings for all placeholders
+                for sub_sentinel in &rep.sub_sentinels {
+                    if let Some(name) = ctx.reverse_placeholders.get(sub_sentinel) {
+                        captures.insert(name.clone(), String::new());
+                    }
+                }
+            } else {
+                let mut accum: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+                for g in 0..num_groups {
+                    for (j, sub_sentinel) in rep.sub_sentinels.iter().enumerate() {
+                        let s_idx = fixed + g * group_size + j;
+                        let s_child = source_node.named_child(s_idx as u32).unwrap();
+                        accum.entry(sub_sentinel.clone())
+                            .or_default()
+                            .push((s_child.start_byte(), s_child.end_byte()));
+                    }
+                }
+                for (sub_sentinel, ranges) in &accum {
+                    if let Some(name) = ctx.reverse_placeholders.get(sub_sentinel) {
+                        let text: String = ranges.iter()
+                            .map(|&(s, e)| &ctx.source_text[s..e])
+                            .collect::<Vec<_>>()
+                            .concat();
+                        captures.insert(name.clone(), text);
+                    }
+                }
+            }
         }
 
         return true;
@@ -609,23 +651,32 @@ fn preprocess_snippet(
                         }
                     };
 
-                    // Extract inner placeholder: $name (ignore any trailing content like commas)
-                    let inner_trimmed = inner.trim();
-                    let name = if let Some(rest) = inner_trimmed.strip_prefix('$') {
-                        let mut cleaned = String::new();
-                        for ch in rest.trim().chars() {
-                            if ch.is_ascii_alphanumeric() || ch == '_' {
-                                cleaned.push(ch);
+                    // Extract ALL $name placeholders from the inner content
+                    // (supports multi-item repetitions like `$($a + $b),*`)
+                    let mut sub_sentinels: Vec<String> = Vec::new();
+                    let mut search_pos = 0;
+                    while let Some(pos) = inner[search_pos..].find('$') {
+                        let abs_pos = search_pos + pos;
+                        let after_dollar = &inner[abs_pos + 1..];
+                        let name_len = after_dollar.chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .count();
+                        if name_len > 0 {
+                            let sub_name: String = after_dollar[..name_len].to_string();
+                            let sentinel = if let Some(existing) = placeholders.get(&sub_name) {
+                                existing.clone()
                             } else {
-                                break;
-                            }
+                                counter += 1;
+                                let s = format!("_pw_{}", counter);
+                                placeholders.insert(sub_name.clone(), s.clone());
+                                s
+                            };
+                            sub_sentinels.push(sentinel);
                         }
-                        cleaned
-                    } else {
-                        String::new()
-                    };
+                        search_pos = abs_pos + 1 + name_len;
+                    }
 
-                    if name.is_empty() {
+                    if sub_sentinels.is_empty() {
                         // Not valid repetition syntax — treat as literal
                         result.push_str("$(");
                         result.push_str(&inner);
@@ -634,21 +685,25 @@ fn preprocess_snippet(
                         continue;
                     }
 
-                    if let Some(existing) = placeholders.get(&name) {
-                        result.push_str(existing);
-                        repetitions.insert(existing.clone(), RepetitionInfo {
-                            op,
-                            kind: RepetitionKind::LastChild,
-                        });
-                    } else {
-                        counter += 1;
-                        let sentinel = format!("_pw_{}", counter);
-                        placeholders.insert(name, sentinel.clone());
+                    if sub_sentinels.len() == 1 {
+                        // Single-item: use the placeholder's own sentinel
+                        let sentinel = &sub_sentinels[0];
+                        result.push_str(sentinel);
                         repetitions.insert(sentinel.clone(), RepetitionInfo {
                             op,
                             kind: RepetitionKind::LastChild,
+                            sub_sentinels: Vec::new(),
                         });
-                        result.push_str(&sentinel);
+                    } else {
+                        // Multi-item: create a group sentinel
+                        counter += 1;
+                        let group_sentinel = format!("_pw_{}", counter);
+                        repetitions.insert(group_sentinel.clone(), RepetitionInfo {
+                            op,
+                            kind: RepetitionKind::LastChild,
+                            sub_sentinels,
+                        });
+                        result.push_str(&group_sentinel);
                     }
                     continue;
                 } else if next == '$' {
@@ -678,6 +733,7 @@ fn preprocess_snippet(
                             repetitions.insert(sentinel.clone(), RepetitionInfo {
                                 op: "*".to_string(),
                                 kind: RepetitionKind::MultiChild,
+                                sub_sentinels: Vec::new(),
                             });
                             result.push_str(&sentinel);
                             continue;
@@ -713,6 +769,7 @@ fn preprocess_snippet(
                             repetitions.insert(sentinel.clone(), RepetitionInfo {
                                 op: "*".to_string(),
                                 kind: RepetitionKind::MultiChild,
+                                sub_sentinels: Vec::new(),
                             });
                         }
                         // $BODY and $STMT need a semicolon to be valid
@@ -1627,6 +1684,120 @@ class A {
         let matches =
             find_snippet_matches(source, r#"log($x:string_literal);"#, &java_lang()).unwrap();
         assert!(matches.is_empty());
+    }
+
+    // ——— multi-item repetition groups ———
+
+    #[test]
+    fn test_multi_item_matches_all_groups() {
+        // $($key, $val),* matches key-value pairs in flat argument list
+        let source = "class A { void m() { f(x, 1, y, 2, z, 3); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($key, $val),*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1, "should match the call with 6 args");
+        let cap_key = matches[0].captures.get("key").unwrap();
+        let cap_val = matches[0].captures.get("val").unwrap();
+        assert!(
+            cap_key.contains('x') && cap_key.contains('y') && cap_key.contains('z'),
+            "key should contain x, y, z: {}",
+            cap_key
+        );
+        assert!(
+            cap_val.contains('1') && cap_val.contains('2') && cap_val.contains('3'),
+            "val should contain 1, 2, 3: {}",
+            cap_val
+        );
+    }
+
+    #[test]
+    fn test_multi_item_single_group() {
+        // Single group of multi-item repetition should match
+        let source = "class A { void m() { f(a, 1); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($key, $val),*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("key").map(|s| s.as_str()), Some("a"));
+        assert_eq!(matches[0].captures.get("val").map(|s| s.as_str()), Some("1"));
+    }
+
+    #[test]
+    fn test_multi_item_zero_matches_allowed_by_star() {
+        // $($key, $val),* should match f() with zero args
+        let source = "class A { void m() { f(); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($key, $val),*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("key").map(|s| s.as_str()), Some(""));
+        assert_eq!(matches[0].captures.get("val").map(|s| s.as_str()), Some(""));
+    }
+
+    #[test]
+    fn test_multi_item_plus_requires_at_least_one() {
+        // $($key, $val),+ should NOT match f() with zero args
+        let source = "class A { void m() { f(); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($key, $val),+);", &java_lang()).unwrap();
+        assert!(matches.is_empty(), "plus quantifier requires at least one group");
+    }
+
+    #[test]
+    fn test_multi_item_op_mismatch() {
+        // $($key, $val),? should not match more than one group
+        let source = "class A { void m() { f(a, 1, b, 2); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($key, $val),?);", &java_lang()).unwrap();
+        assert!(matches.is_empty(), "optional quantifier allows at most one group");
+    }
+
+    #[test]
+    fn test_multi_item_combined_with_single_placeholder() {
+        // Mix multi-item repetition with a regular placeholder before it
+        let source = "class A { void m() { f(name, x, 1, y, 2); } }";
+        let matches = find_snippet_matches(
+            source,
+            "$f($prefix, $($key, $val),*);",
+            &java_lang(),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("prefix").map(|s| s.as_str()), Some("name"));
+        assert!(matches[0].captures.get("key").unwrap().contains('x'));
+        assert!(matches[0].captures.get("val").unwrap().contains('1'));
+    }
+
+    #[test]
+    fn test_multi_item_preprocess() {
+        let ps = preprocess_snippet("$($a, $b),*");
+        // Should have both placeholders registered
+        assert!(ps.placeholders.contains_key("a"));
+        assert!(ps.placeholders.contains_key("b"));
+        // Should have a repetition entry (group sentinel)
+        assert_eq!(ps.repetitions.len(), 1);
+        let (sentinel, info) = ps.repetitions.iter().next().unwrap();
+        // sub_sentinels should be non-empty for multi-item
+        assert_eq!(info.sub_sentinels.len(), 2);
+        assert_eq!(info.sub_sentinels[0], *ps.placeholders.get("a").unwrap());
+        assert_eq!(info.sub_sentinels[1], *ps.placeholders.get("b").unwrap());
+        assert_eq!(info.kind, RepetitionKind::LastChild);
+        // Pattern text should contain the group sentinel
+        assert!(ps.pattern_text.contains(sentinel.as_str()));
+    }
+
+    #[test]
+    fn test_multi_item_single_item_still_works() {
+        // Existing single-item $($arg,)* should still work with backwards compat
+        let source = "class A { void m() { f(a, b, c); } }";
+        let matches =
+            find_snippet_matches(source, "$f($($arg,)*);", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        let cap = matches[0].captures.get("arg").unwrap();
+        assert!(cap.contains('a'));
+        assert!(cap.contains('b'));
+        assert!(cap.contains('c'));
+        // Verify single-item uses empty sub_sentinels
+        let ps = preprocess_snippet("$($arg,)*");
+        let info = ps.repetitions.values().next().unwrap();
+        assert!(info.sub_sentinels.is_empty());
     }
 
 }
