@@ -82,7 +82,7 @@ pub fn matches_to_edits(matches: &[Match], op: &Operation) -> Vec<Edit> {
 /// Apply edits to source text, processing bottom-up to preserve byte offsets.
 pub fn apply_edits(source: &str, edits: &[Edit]) -> Result<String, String> {
     let mut sorted = edits.to_vec();
-    sorted.sort_by(|a, b| b.start_byte.cmp(&a.start_byte));
+    sorted.sort_by_key(|e| std::cmp::Reverse(e.start_byte));
 
     // Check for overlapping edits
     for i in 1..sorted.len() {
