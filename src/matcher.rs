@@ -135,6 +135,7 @@ struct MatchCtx<'a> {
     reverse_placeholders: &'a HashMap<String, String>,
     repetitions: &'a HashMap<String, RepetitionInfo>,
     specials: &'a HashMap<String, SpecialKind>,
+    type_constraints: &'a HashMap<String, String>,
 }
 
 /// Check if two nodes are structurally equivalent.
@@ -154,6 +155,12 @@ fn structurally_matches(
         if let Some(name) = ctx.reverse_placeholders.get(sentinel) {
             let matched = &ctx.source_text[source_node.start_byte()..source_node.end_byte()];
             captures.insert(name.clone(), matched.to_string());
+        }
+        // Check type constraint: $name:Kind restricts to a specific AST kind
+        if let Some(constrained_kind) = ctx.type_constraints.get(sentinel) {
+            if source_node.kind() != constrained_kind.as_str() {
+                return false;
+            }
         }
         return true;
     }
@@ -516,6 +523,9 @@ struct ProcessedSnippet {
     placeholders: HashMap<String, String>,
     repetitions: HashMap<String, RepetitionInfo>,
     specials: HashMap<String, SpecialKind>,
+    /// Maps sentinel → tree-sitter AST kind name that the placeholder
+    /// is constrained to match. E.g. `$x:identifier` stores sentinel → "identifier".
+    type_constraints: HashMap<String, String>,
 }
 
 /// Preprocess a snippet, replacing `$name` placeholders with unique
@@ -534,6 +544,7 @@ fn preprocess_snippet(
     let mut placeholders: HashMap<String, String> = HashMap::new();
     let mut repetitions: HashMap<String, RepetitionInfo> = HashMap::new();
     let mut specials: HashMap<String, SpecialKind> = HashMap::new();
+    let mut type_constraints: HashMap<String, String> = HashMap::new();
     let mut counter = 0usize;
     let mut chars = snippet.char_indices().peekable();
 
@@ -718,8 +729,28 @@ fn preprocess_snippet(
                     } else {
                         counter += 1;
                         let sentinel = format!("_pw_{}", counter);
-                        placeholders.insert(name, sentinel.clone());
+                        placeholders.insert(name.clone(), sentinel.clone());
                         result.push_str(&sentinel);
+                    }
+                    // Check for Rust-macro-style type constraint: $name:Kind
+                    if let Some(&(_, next_c)) = chars.peek() {
+                        if next_c == ':' {
+                            chars.next(); // consume ':'
+                            let mut kind_name = String::new();
+                            while let Some(&(_, c)) = chars.peek() {
+                                if c.is_ascii_alphanumeric() || c == '_' {
+                                    kind_name.push(c);
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !kind_name.is_empty() {
+                                if let Some(sentinel) = placeholders.get(&name) {
+                                    type_constraints.entry(sentinel.clone()).or_insert(kind_name);
+                                }
+                            }
+                        }
                     }
                     continue;
                 }
@@ -728,7 +759,7 @@ fn preprocess_snippet(
         result.push(c);
     }
 
-    ProcessedSnippet { pattern_text: result, placeholders, repetitions, specials }
+    ProcessedSnippet { pattern_text: result, placeholders, repetitions, specials, type_constraints }
 }
 
 /// Find all snippet matches in source text.
@@ -740,6 +771,9 @@ fn preprocess_snippet(
 /// Use `$($name)sep*` / `$($name)sep+` (Rust macro repetition syntax)
 /// for zero-or-more (`*`), one-or-more (`+`), or optional (`?`) matching
 /// in the last child position.
+///
+/// Use `$name:Kind` to constrain a placeholder to a specific tree-sitter
+/// AST kind (e.g. `$x:identifier` matches only identifiers).
 pub fn find_snippet_matches(
     source: &str,
     snippet: &str,
@@ -771,6 +805,7 @@ pub fn find_snippet_matches(
         reverse_placeholders: &reverse_ph,
         repetitions: &processed.repetitions,
         specials: &processed.specials,
+        type_constraints: &processed.type_constraints,
     };
 
     let mut matches = Vec::new();
@@ -1483,6 +1518,115 @@ class A {
         assert_eq!(matches.len(), 1);
         assert!(matches[0].captures.get("EXPR").unwrap().contains("x > 0"));
         assert!(matches[0].captures.get("BODY").unwrap().contains("return"));
+    }
+
+    // ——— type-constrained placeholders: $name:Kind ———
+
+    #[test]
+    fn test_type_constraint_identifier() {
+        let source = "class A { void f() { x = 42; } }";
+        let matches = find_snippet_matches(source, "$x:identifier = 42;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("x").map(|s| s.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn test_type_constraint_identifier_rejects_literal() {
+        let source = "class A { void f() { return 42; } }";
+        let matches = find_snippet_matches(source, "$x:identifier = 42;", &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_type_constraint_string_literal() {
+        let source = r#"class A { void f() { log("hello"); } }"#;
+        let matches =
+            find_snippet_matches(source, r#"log($msg:string_literal);"#, &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].captures.get("msg").map(|s| s.as_str()),
+            Some(r#""hello""#)
+        );
+    }
+
+    #[test]
+    fn test_type_constraint_string_literal_rejects_identifier() {
+        let source = "class A { void f() { log(x); } }";
+        let matches =
+            find_snippet_matches(source, r#"log($msg:string_literal);"#, &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_type_constraint_number_literal() {
+        let source = "class A { void f() { return 42; } }";
+        let matches =
+            find_snippet_matches(source, "return $n:decimal_integer_literal;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].captures.get("n").map(|s| s.as_str()), Some("42"));
+    }
+
+    #[test]
+    fn test_type_constraint_number_literal_rejects_identifier() {
+        let source = "class A { void f() { return x; } }";
+        let matches =
+            find_snippet_matches(source, "return $n:decimal_integer_literal;", &java_lang()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_type_constraint_multiple_placeholders() {
+        let source = r#"class A { void f() { log("msg", 42); } }"#;
+        let matches = find_snippet_matches(
+            source,
+            r#"log($msg:string_literal, $n:decimal_integer_literal);"#,
+            &java_lang(),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].captures.get("msg").map(|s| s.as_str()),
+            Some(r#""msg""#)
+        );
+        assert_eq!(matches[0].captures.get("n").map(|s| s.as_str()), Some("42"));
+    }
+
+    #[test]
+    fn test_type_constraint_first_occurrence_wins_on_reuse() {
+        let source = "class A { void f() { x = y; } }";
+        let matches = find_snippet_matches(source, "$x:identifier = $x;", &java_lang()).unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_type_constraint_no_trailing_colon_ambiguity() {
+        let result = find_snippet_matches("class A { }", "$x:", &java_lang());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_type_constraint_preprocess() {
+        let ps = preprocess_snippet("$x:identifier");
+        assert_eq!(ps.type_constraints.len(), 1);
+        let sentinel = ps.placeholders.get("x").unwrap();
+        assert_eq!(
+            ps.type_constraints.get(sentinel).map(|s| s.as_str()),
+            Some("identifier")
+        );
+    }
+
+    #[test]
+    fn test_type_constraint_preprocess_unnamed() {
+        let ps = preprocess_snippet("$x:");
+        assert!(ps.type_constraints.is_empty());
+    }
+
+    #[test]
+    fn test_type_constraint_rejects_on_kind_mismatch() {
+        let source = r#"class A { void f() { log(42); } }"#;
+        let matches =
+            find_snippet_matches(source, r#"log($x:string_literal);"#, &java_lang()).unwrap();
+        assert!(matches.is_empty());
     }
 
 }

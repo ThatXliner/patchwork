@@ -88,6 +88,23 @@ patchwork delete -i -p 'debug($msg)' src/*.py
 patchwork find -p 'return $val;' src/
 ```
 
+### Type-constrained placeholders: `$name:Kind`
+
+Inspired by [Rust macro fragment specifiers](https://doc.rust-lang.org/reference/macros-by-example.html#metavariables-and-expansion), `$name:Kind` restricts a placeholder to match only nodes of a specific tree-sitter AST kind:
+
+```bash
+# Match only identifiers on the LHS (not obj.prop = ...)
+patchwork find -p '$x:identifier = $val;' src/
+
+# Match only string literal arguments
+patchwork find -p 'log($msg:string_literal);' src/
+
+# Match returns of integer literals only
+patchwork find -p 'return $n:decimal_integer_literal;' src/
+```
+
+The kind name is any tree-sitter node kind for that language — `identifier`, `string_literal`, `decimal_integer_literal`, `method_invocation`, `binary_expression`, etc.
+
 ### Special tokens
 
 Pre-defined shortcuts for common patterns:
