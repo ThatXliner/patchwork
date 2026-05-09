@@ -396,3 +396,27 @@ fn test_expr_replace() {
     assert!(out.contains("log(x)"), "got: {}", out);
     assert!(!out.contains("debug(x)"));
 }
+
+#[test]
+fn test_nodes_subcommand_java() {
+    let out = run_pipe(&["nodes", "java"], "").unwrap();
+    assert!(out.contains("identifier"), "should contain identifier, got: {}", out);
+    assert!(out.contains("method_invocation"), "should contain method_invocation");
+    assert!(out.contains("string_literal"), "should contain string_literal");
+}
+
+#[test]
+fn test_nodes_subcommand_unknown_language() {
+    let result = run_pipe(&["nodes", "not-a-language"], "");
+    assert!(result.is_err(), "should error on unknown language");
+}
+
+#[test]
+fn test_nodes_subcommand_includes_anonymous() {
+    let normal = run_pipe(&["nodes", "java"], "").unwrap();
+    let all = run_pipe(&["nodes", "java", "--all"], "").unwrap();
+    // --all should have more entries
+    assert!(all.lines().count() > normal.lines().count());
+    // anonymous nodes like "+" should appear in --all
+    assert!(all.contains('+'), "should include + in --all");
+}

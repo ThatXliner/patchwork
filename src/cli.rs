@@ -71,6 +71,12 @@ pub enum Command {
         in_place: bool,
         files: Vec<String>,
     },
+    /// List available tree-sitter node kinds for a language
+    Nodes {
+        language: String,
+        #[arg(long = "all", help = "Include anonymous nodes (punctuation, operators, etc.)")]
+        all: bool,
+    },
 }
 
 pub fn ensure_pattern_or_query(

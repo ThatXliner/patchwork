@@ -68,6 +68,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Operation::InsertAfter(code.clone()),
             *in_place,
         ),
+        Command::Nodes { language, all } => {
+            let lang = Lang::from_name(language).ok_or_else(|| {
+                let supported: Vec<&str> = Lang::all().iter().map(|l| l.name()).collect();
+                format!("Unknown language '{}'. Supported: {}", language, supported.join(", "))
+            })?;
+            let kinds = lang.list_node_kinds(*all);
+            for kind in kinds {
+                println!("{kind}");
+            }
+            Ok(())
+        }
     }
 }
 

@@ -103,6 +103,25 @@ impl Lang {
             Lang::Php, Lang::Bash,
         ]
     }
+
+    /// List all tree-sitter node kind names for this language.
+    /// When `include_anonymous` is false, only named nodes are returned.
+    pub fn list_node_kinds(&self, include_anonymous: bool) -> Vec<&'static str> {
+        let grammar = self.grammar();
+        let count = grammar.node_kind_count();
+        let mut kinds: Vec<&'static str> = (0..count)
+            .filter_map(|id| {
+                let id = id as u16;
+                let name = grammar.node_kind_for_id(id)?;
+                if !include_anonymous && !grammar.node_kind_is_named(id) {
+                    return None;
+                }
+                Some(name)
+            })
+            .collect();
+        kinds.sort();
+        kinds
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +221,36 @@ mod tests {
         assert!(names.contains(&"rust"));
         assert!(names.contains(&"go"));
         assert_eq!(Lang::all().len(), 13);
+    }
+
+    #[test]
+    fn test_list_node_kinds_java_includes_known_kinds() {
+        let kinds = Lang::Java.list_node_kinds(false);
+        assert!(kinds.contains(&"identifier"));
+        assert!(kinds.contains(&"method_invocation"));
+        assert!(kinds.contains(&"string_literal"));
+        assert!(kinds.contains(&"class_declaration"));
+        // Anonymous nodes should NOT be included by default
+        assert!(!kinds.contains(&";"));
+    }
+
+    #[test]
+    fn test_list_node_kinds_java_anonymous() {
+        let kinds = Lang::Java.list_node_kinds(true);
+        assert!(kinds.contains(&"identifier"));
+        assert!(kinds.contains(&"string_literal"));
+        // Anonymous nodes SHOULD be included with --all
+        assert!(kinds.contains(&";"));
+        // Default (non-all) should have fewer entries
+        let named_only = Lang::Java.list_node_kinds(false);
+        assert!(kinds.len() > named_only.len());
+    }
+
+    #[test]
+    fn test_list_node_kinds_all_languages_have_kinds() {
+        for lang in Lang::all() {
+            let kinds = lang.list_node_kinds(false);
+            assert!(!kinds.is_empty(), "{} should have node kinds", lang.name());
+        }
     }
 }
