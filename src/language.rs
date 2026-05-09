@@ -5,7 +5,7 @@ pub enum Lang {
     Python,
     JavaScript,
     TypeScript,
-    TSX,
+    Tsx,
 }
 
 impl Lang {
@@ -19,7 +19,7 @@ impl Lang {
             "py" => Some(Lang::Python),
             "js" | "jsx" | "mjs" | "cjs" => Some(Lang::JavaScript),
             "ts" => Some(Lang::TypeScript),
-            "tsx" => Some(Lang::TSX),
+            "tsx" => Some(Lang::Tsx),
             _ => None,
         }
     }
@@ -30,7 +30,7 @@ impl Lang {
             "python" | "py" => Some(Lang::Python),
             "javascript" | "js" => Some(Lang::JavaScript),
             "typescript" | "ts" => Some(Lang::TypeScript),
-            "tsx" => Some(Lang::TSX),
+            "tsx" => Some(Lang::Tsx),
             _ => None,
         }
     }
@@ -41,7 +41,7 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Lang::TSX => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 }
@@ -62,7 +62,7 @@ mod tests {
             Lang::from_extension("foo.ts"),
             Some(Lang::TypeScript)
         ));
-        assert!(matches!(Lang::from_extension("foo.tsx"), Some(Lang::TSX)));
+        assert!(matches!(Lang::from_extension("foo.tsx"), Some(Lang::Tsx)));
         assert!(Lang::from_extension("foo.rs").is_none());
     }
 

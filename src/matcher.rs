@@ -128,6 +128,15 @@ fn last_child_repetition(
     }
 }
 
+/// Shared read-only context passed through match functions.
+struct MatchCtx<'a> {
+    source_text: &'a str,
+    pattern_text: &'a str,
+    reverse_placeholders: &'a HashMap<String, String>,
+    repetitions: &'a HashMap<String, RepetitionInfo>,
+    specials: &'a HashMap<String, SpecialKind>,
+}
+
 /// Check if two nodes are structurally equivalent.
 ///
 /// Named leaf nodes (identifiers, literals) match by text content by
@@ -137,28 +146,20 @@ fn last_child_repetition(
 fn structurally_matches(
     source_node: Node,
     pattern_node: Node,
-    source_text: &str,
-    pattern_text: &str,
     captures: &mut HashMap<String, String>,
-    reverse_placeholders: &HashMap<String, String>,
-    repetitions: &HashMap<String, RepetitionInfo>,
-    specials: &HashMap<String, SpecialKind>,
+    ctx: &MatchCtx,
 ) -> bool {
-    // A $ placeholder matches any single source node (any kind, any text)
-    if is_placeholder(pattern_node, pattern_text) {
-        let sentinel = &pattern_text[pattern_node.start_byte()..pattern_node.end_byte()];
-        if let Some(name) = reverse_placeholders.get(sentinel) {
-            let matched = &source_text[source_node.start_byte()..source_node.end_byte()];
+    if is_placeholder(pattern_node, ctx.pattern_text) {
+        let sentinel = &ctx.pattern_text[pattern_node.start_byte()..pattern_node.end_byte()];
+        if let Some(name) = ctx.reverse_placeholders.get(sentinel) {
+            let matched = &ctx.source_text[source_node.start_byte()..source_node.end_byte()];
             captures.insert(name.clone(), matched.to_string());
         }
         return true;
     }
 
     if source_node.kind() != pattern_node.kind() {
-        // Check if pattern node wraps $STMT/$EXPR/$BODY.
-        // Only fires on kind mismatch — e.g., `expression_statement` wrapping
-        // `$STMT` matching against `return_statement`.
-        if let Some(special) = wraps_special(pattern_node, pattern_text, specials) {
+        if let Some(special) = wraps_special(pattern_node, ctx.pattern_text, ctx.specials) {
             let matched_kind = match special {
                 SpecialKind::Stmt => is_statement_kind(source_node.kind()),
                 SpecialKind::Expr => !is_statement_kind(source_node.kind())
@@ -167,10 +168,10 @@ fn structurally_matches(
                 SpecialKind::Body => is_statement_kind(source_node.kind()),
             };
             if matched_kind {
-                if let Some(sentinel) = inner_sentinel(pattern_node, pattern_text) {
-                    if let Some(name) = reverse_placeholders.get(&sentinel) {
+                if let Some(sentinel) = inner_sentinel(pattern_node, ctx.pattern_text) {
+                    if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
                         let matched =
-                            &source_text[source_node.start_byte()..source_node.end_byte()];
+                            &ctx.source_text[source_node.start_byte()..source_node.end_byte()];
                         captures.insert(name.clone(), matched.to_string());
                     }
                 }
@@ -183,24 +184,15 @@ fn structurally_matches(
     let pattern_named = pattern_node.named_child_count();
     let source_named = source_node.named_child_count();
 
-    // Check if the last child of the *parent* is a repetition.
-    // We handle this at the parent level by checking whether
-    // `pattern_node` (a child of some caller) is a repetition.
-    // Actually, we need to check if the pattern_node ITSELF
-    // is the parent that has a repetition child. That happens
-    // in the child comparison loop at the caller.
-    //
-    // But the repetition applies when the PATTERN node is the one
-    // whose last child is a repetition. So we check here:
-    if let Some((sentinel, rep)) = last_child_repetition(pattern_node, pattern_text, repetitions) {
-        // Non-repetition children count = pattern_named - 1
+    if let Some((sentinel, rep)) =
+        last_child_repetition(pattern_node, ctx.pattern_text, ctx.repetitions)
+    {
         let fixed = pattern_named - 1;
         if source_named < fixed {
             return false;
         }
         let matched_count = source_named - fixed;
 
-        // Check repetition bounds
         if rep.op == "+" && matched_count == 0 {
             return false;
         }
@@ -208,7 +200,6 @@ fn structurally_matches(
             return false;
         }
 
-        // Compare fixed children 1:1
         for i in 0..fixed {
             let Some(p_child) = pattern_node.named_child(i as u32) else {
                 return false;
@@ -216,77 +207,56 @@ fn structurally_matches(
             let Some(s_child) = source_node.named_child(i as u32) else {
                 return false;
             };
-            if !structurally_matches(
-                s_child,
-                p_child,
-                source_text,
-                pattern_text,
-                captures,
-                reverse_placeholders,
-                repetitions,
-                specials,
-            ) {
+            if !structurally_matches(s_child, p_child, captures, ctx) {
                 return false;
             }
         }
 
-        // Capture the repetition match
         if matched_count > 0 {
-            if let Some(name) = reverse_placeholders.get(&sentinel) {
+            if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
                 let first = source_node.named_child(fixed as u32).unwrap();
                 let last = source_node.named_child((source_named - 1) as u32).unwrap();
-                let text = &source_text[first.start_byte()..last.end_byte()];
+                let text = &ctx.source_text[first.start_byte()..last.end_byte()];
                 captures.insert(name.clone(), text.to_string());
             }
-        } else if let Some(name) = reverse_placeholders.get(&sentinel) {
+        } else if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
             captures.insert(name.clone(), String::new());
         }
 
         return true;
     }
 
-    // Check for multi-child placeholders before enforcing exact child count.
-    // $$$name can consume 0+ source children, so child counts may differ.
-    // A wrapper like `expression_statement` → `$$$body` counts via
-    // wraps_multi_placeholder, but only when it's the sole named child
-    // (otherwise argument_list wrapping $$$args would trigger at the wrong level).
     let p_children = named_children(pattern_node);
     let has_multi = p_children.iter().any(|c| {
-        is_multi_placeholder(*c, pattern_text, repetitions)
-            || matches!(wraps_special(*c, pattern_text, specials), Some(SpecialKind::Body))
+        is_multi_placeholder(*c, ctx.pattern_text, ctx.repetitions)
+            || matches!(
+                wraps_special(*c, ctx.pattern_text, ctx.specials),
+                Some(SpecialKind::Body)
+            )
     });
 
     if !has_multi {
-        // No multi-child placeholder — exact child count match required
         if pattern_named != source_named {
             return false;
         }
 
-        // Both are named leaves — compare text
         if pattern_named == 0 {
             if pattern_node.is_named() {
-                return leaf_matches(source_text, pattern_text, source_node, pattern_node);
+                return leaf_matches(
+                    ctx.source_text,
+                    ctx.pattern_text,
+                    source_node,
+                    pattern_node,
+                );
             }
             return true;
         }
     }
 
-    // Compare named children — use backtracking for multi-child placeholders
     let s_children = named_children(source_node);
     let p_children = named_children(pattern_node);
 
-    match_children_suffix(
-        &s_children,
-        &p_children,
-        0,
-        0,
-        source_text,
-        pattern_text,
-        captures,
-        reverse_placeholders,
-        repetitions,
-        specials,
-    )
+    match_children_suffix(&s_children, &p_children, 0, 0, captures, ctx)
 }
 
 /// Check if a pattern node is a multi-child placeholder (`$$$name` or `$$$`).
@@ -349,23 +319,10 @@ fn inner_sentinel(node: Node, pattern_text: &str) -> Option<String> {
 fn match_single_child(
     s_child: Node,
     p_child: Node,
-    source_text: &str,
-    pattern_text: &str,
     captures: &mut HashMap<String, String>,
-    reverse_placeholders: &HashMap<String, String>,
-    repetitions: &HashMap<String, RepetitionInfo>,
-    specials: &HashMap<String, SpecialKind>,
+    ctx: &MatchCtx,
 ) -> bool {
-    structurally_matches(
-        s_child,
-        p_child,
-        source_text,
-        pattern_text,
-        captures,
-        reverse_placeholders,
-        repetitions,
-        specials,
-    )
+    structurally_matches(s_child, p_child, captures, ctx)
 }
 
 /// Match a suffix of pattern children against a suffix of source children,
@@ -378,23 +335,17 @@ fn match_children_suffix(
     p_children: &[Node<'_>],
     si: usize,
     pi: usize,
-    source_text: &str,
-    pattern_text: &str,
     captures: &mut HashMap<String, String>,
-    reverse_placeholders: &HashMap<String, String>,
-    repetitions: &HashMap<String, RepetitionInfo>,
-    specials: &HashMap<String, SpecialKind>,
+    ctx: &MatchCtx,
 ) -> bool {
     if pi >= p_children.len() {
-        // No more pattern children — all source children must be consumed
         return si >= s_children.len();
     }
 
     let p_child = p_children[pi];
 
-    // $BODY wrapper: consume 0+ source children (any statements)
-    if let Some(SpecialKind::Body) = wraps_special(p_child, pattern_text, specials) {
-        let sentinel = inner_sentinel(p_child, pattern_text).unwrap_or_default();
+    if let Some(SpecialKind::Body) = wraps_special(p_child, ctx.pattern_text, ctx.specials) {
+        let sentinel = inner_sentinel(p_child, ctx.pattern_text).unwrap_or_default();
         let min = 0;
         let max = s_children
             .len()
@@ -405,30 +356,18 @@ fn match_children_suffix(
             let saved = captures.clone();
             let end = si + n;
 
-            if let Some(name) = reverse_placeholders.get(&sentinel) {
+            if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
                 if n > 0 {
                     let first = s_children[si];
                     let last = s_children[end - 1];
-                    let text =
-                        &source_text[first.start_byte()..last.end_byte()];
+                    let text = &ctx.source_text[first.start_byte()..last.end_byte()];
                     captures.insert(name.clone(), text.to_string());
                 } else {
                     captures.insert(name.clone(), String::new());
                 }
             }
 
-            if match_children_suffix(
-                s_children,
-                p_children,
-                end,
-                pi + 1,
-                source_text,
-                pattern_text,
-                captures,
-                reverse_placeholders,
-                repetitions,
-                specials,
-            ) {
+            if match_children_suffix(s_children, p_children, end, pi + 1, captures, ctx) {
                 return true;
             }
 
@@ -438,11 +377,9 @@ fn match_children_suffix(
         return false;
     }
 
-    if is_multi_placeholder(p_child, pattern_text, repetitions) {
-        let sentinel =
-            pattern_text[p_child.start_byte()..p_child.end_byte()].to_string();
-        let rep = repetitions.get(&sentinel).unwrap();
-        // Determine min/max source children this placeholder can consume
+    if is_multi_placeholder(p_child, ctx.pattern_text, ctx.repetitions) {
+        let sentinel = ctx.pattern_text[p_child.start_byte()..p_child.end_byte()].to_string();
+        let rep = ctx.repetitions.get(&sentinel).unwrap();
         let min = if rep.op == "+" { 1 } else { 0 };
         let max = match rep.op.as_str() {
             "?" => 1,
@@ -455,70 +392,36 @@ fn match_children_suffix(
             let saved = captures.clone();
             let end = si + n;
 
-            // Capture spanned text for named placeholders
-            if let Some(name) = reverse_placeholders.get(&sentinel) {
+            if let Some(name) = ctx.reverse_placeholders.get(&sentinel) {
                 if n > 0 {
                     let first = s_children[si];
                     let last = s_children[end - 1];
-                    let text = &source_text[first.start_byte()..last.end_byte()];
+                    let text = &ctx.source_text[first.start_byte()..last.end_byte()];
                     captures.insert(name.clone(), text.to_string());
                 } else {
                     captures.insert(name.clone(), String::new());
                 }
             }
 
-            if match_children_suffix(
-                s_children,
-                p_children,
-                end,
-                pi + 1,
-                source_text,
-                pattern_text,
-                captures,
-                reverse_placeholders,
-                repetitions,
-                specials,
-            ) {
+            if match_children_suffix(s_children, p_children, end, pi + 1, captures, ctx) {
                 return true;
             }
 
-            // Backtrack
             *captures = saved;
         }
 
         return false;
     }
 
-    // Regular (non-multi) pattern child — must match exactly one source child
     if si >= s_children.len() {
         return false;
     }
 
-    if !match_single_child(
-        s_children[si],
-        p_child,
-        source_text,
-        pattern_text,
-        captures,
-        reverse_placeholders,
-        repetitions,
-        specials,
-    ) {
+    if !match_single_child(s_children[si], p_child, captures, ctx) {
         return false;
     }
 
-    match_children_suffix(
-        s_children,
-        p_children,
-        si + 1,
-        pi + 1,
-        source_text,
-        pattern_text,
-        captures,
-        reverse_placeholders,
-        repetitions,
-        specials,
-    )
+    match_children_suffix(s_children, p_children, si + 1, pi + 1, captures, ctx)
 }
 
 /// Collect named children of `node` into a vector.
@@ -565,26 +468,13 @@ fn collect_matches(
     cursor: &mut TreeCursor,
     pattern: Node,
     matches: &mut Vec<Match>,
-    source_text: &str,
-    pattern_text: &str,
-    reverse_placeholders: &HashMap<String, String>,
-    repetitions: &HashMap<String, RepetitionInfo>,
-    specials: &HashMap<String, SpecialKind>,
+    ctx: &MatchCtx,
 ) {
     let node = cursor.node();
 
     // Try full pattern match
     let mut captures = HashMap::new();
-    if structurally_matches(
-        node,
-        pattern,
-        source_text,
-        pattern_text,
-        &mut captures,
-        reverse_placeholders,
-        repetitions,
-        specials,
-    ) {
+    if structurally_matches(node, pattern, &mut captures, ctx) {
         matches.push(Match {
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
@@ -596,18 +486,9 @@ fn collect_matches(
         // Try unwrapped pattern — strip statement-level wrappers
         // to match deeper (e.g., method calls inside return_statements).
         // Skips bare placeholders to avoid overly broad matches.
-        if let Some(inner) = try_unwrap_pattern(pattern, pattern_text) {
+        if let Some(inner) = try_unwrap_pattern(pattern, ctx.pattern_text) {
             let mut captures = HashMap::new();
-            if structurally_matches(
-                node,
-                inner,
-                source_text,
-                pattern_text,
-                &mut captures,
-                reverse_placeholders,
-                repetitions,
-                specials,
-            ) {
+            if structurally_matches(node, inner, &mut captures, ctx) {
                 matches.push(Match {
                     start_byte: node.start_byte(),
                     end_byte: node.end_byte(),
@@ -621,22 +502,20 @@ fn collect_matches(
 
     if cursor.goto_first_child() {
         loop {
-            collect_matches(
-                cursor,
-                pattern,
-                matches,
-                source_text,
-                pattern_text,
-                reverse_placeholders,
-                repetitions,
-                specials,
-            );
+            collect_matches(cursor, pattern, matches, ctx);
             if !cursor.goto_next_sibling() {
                 break;
             }
         }
         cursor.goto_parent();
     }
+}
+
+struct ProcessedSnippet {
+    pattern_text: String,
+    placeholders: HashMap<String, String>,
+    repetitions: HashMap<String, RepetitionInfo>,
+    specials: HashMap<String, SpecialKind>,
 }
 
 /// Preprocess a snippet, replacing `$name` placeholders with unique
@@ -650,12 +529,7 @@ fn collect_matches(
 /// and a map of sentinels with repetition info.
 fn preprocess_snippet(
     snippet: &str,
-) -> (
-    String,
-    HashMap<String, String>,
-    HashMap<String, RepetitionInfo>,
-    HashMap<String, SpecialKind>,
-) {
+) -> ProcessedSnippet {
     let mut result = String::with_capacity(snippet.len());
     let mut placeholders: HashMap<String, String> = HashMap::new();
     let mut repetitions: HashMap<String, RepetitionInfo> = HashMap::new();
@@ -854,7 +728,7 @@ fn preprocess_snippet(
         result.push(c);
     }
 
-    (result, placeholders, repetitions, specials)
+    ProcessedSnippet { pattern_text: result, placeholders, repetitions, specials }
 }
 
 /// Find all snippet matches in source text.
@@ -871,8 +745,8 @@ pub fn find_snippet_matches(
     snippet: &str,
     lang: &Language,
 ) -> Result<Vec<Match>, String> {
-    let (pattern_text, placeholders, repetitions, specials) = preprocess_snippet(snippet);
-    let reverse_ph = reverse_placeholder_map(&placeholders);
+    let processed = preprocess_snippet(snippet);
+    let reverse_ph = reverse_placeholder_map(&processed.placeholders);
 
     let mut parser = Parser::new();
     parser
@@ -880,7 +754,7 @@ pub fn find_snippet_matches(
         .map_err(|e| format!("Failed to set language: {}", e))?;
 
     let snippet_tree = parser
-        .parse(&pattern_text, None)
+        .parse(&processed.pattern_text, None)
         .ok_or("Failed to parse snippet")?;
     let pattern = extract_pattern(snippet_tree.root_node())
         .ok_or("Could not extract pattern from snippet")?;
@@ -891,18 +765,17 @@ pub fn find_snippet_matches(
 
     let source_tree = parser.parse(source, None).ok_or("Failed to parse source")?;
 
+    let ctx = MatchCtx {
+        source_text: source,
+        pattern_text: &processed.pattern_text,
+        reverse_placeholders: &reverse_ph,
+        repetitions: &processed.repetitions,
+        specials: &processed.specials,
+    };
+
     let mut matches = Vec::new();
     let mut cursor = source_tree.root_node().walk();
-    collect_matches(
-        &mut cursor,
-        pattern,
-        &mut matches,
-        source,
-        &pattern_text,
-        &reverse_ph,
-        &repetitions,
-        &specials,
-    );
+    collect_matches(&mut cursor, pattern, &mut matches, &ctx);
     Ok(matches)
 }
 
@@ -1218,33 +1091,33 @@ class Outer {
 
     #[test]
     fn test_preprocess_replaces_dollar() {
-        let (text, _, _, _) = preprocess_snippet("$x = $y;");
-        assert_eq!(text, "_pw_1 = _pw_2;");
+        let ps = preprocess_snippet("$x = $y;");
+        assert_eq!(ps.pattern_text, "_pw_1 = _pw_2;");
     }
 
     #[test]
     fn test_preprocess_no_dollar() {
-        let (text, _, _, _) = preprocess_snippet("x = y;");
-        assert_eq!(text, "x = y;");
+        let ps = preprocess_snippet("x = y;");
+        assert_eq!(ps.pattern_text, "x = y;");
     }
 
     // ——— repetition syntax ———
 
     #[test]
     fn test_preprocess_repetition_star() {
-        let (text, placeholders, reps, _) = preprocess_snippet("$f($($arg,)*)");
+        let ps = preprocess_snippet("$f($($arg,)*)");
         // Should produce: _pw_1(_pw_2) with _pw_2 marked as repetition "*"
-        assert_eq!(text, "_pw_1(_pw_2)");
-        assert_eq!(placeholders.get("f").unwrap(), "_pw_1");
-        assert_eq!(placeholders.get("arg").unwrap(), "_pw_2");
-        assert_eq!(reps.get("_pw_2").unwrap().op, "*");
+        assert_eq!(ps.pattern_text, "_pw_1(_pw_2)");
+        assert_eq!(ps.placeholders.get("f").unwrap(), "_pw_1");
+        assert_eq!(ps.placeholders.get("arg").unwrap(), "_pw_2");
+        assert_eq!(ps.repetitions.get("_pw_2").unwrap().op, "*");
     }
 
     #[test]
     fn test_preprocess_repetition_plus() {
-        let (_, _, reps, _) = preprocess_snippet("$($arg,)+");
-        assert!(reps.get("_pw_1").is_some());
-        assert_eq!(reps.get("_pw_1").unwrap().op, "+");
+        let ps = preprocess_snippet("$($arg,)+");
+        assert!(ps.repetitions.get("_pw_1").is_some());
+        assert_eq!(ps.repetitions.get("_pw_1").unwrap().op, "+");
     }
 
     #[test]
@@ -1487,21 +1360,21 @@ class A {
 
     #[test]
     fn test_triple_dollar_preprocess() {
-        let (text, placeholders, reps, _) = preprocess_snippet("$$$args");
-        assert!(text.starts_with("_pw_multi_"), "got: {}", text);
-        assert_eq!(placeholders.get("args").map(|s| s.as_str()), Some(text.as_str()));
-        let rep = reps.get(text.as_str()).unwrap();
+        let ps = preprocess_snippet("$$$args");
+        assert!(ps.pattern_text.starts_with("_pw_multi_"), "got: {}", ps.pattern_text);
+        assert_eq!(ps.placeholders.get("args").map(|s| s.as_str()), Some(ps.pattern_text.as_str()));
+        let rep = ps.repetitions.get(ps.pattern_text.as_str()).unwrap();
         assert_eq!(rep.op, "*");
         assert_eq!(rep.kind, RepetitionKind::MultiChild);
     }
 
     #[test]
     fn test_triple_dollar_preprocess_unnamed() {
-        let (text, placeholders, reps, _) = preprocess_snippet("$$$");
-        assert!(text.starts_with("_pw_multi_"), "got: {}", text);
+        let ps = preprocess_snippet("$$$");
+        assert!(ps.pattern_text.starts_with("_pw_multi_"), "got: {}", ps.pattern_text);
         // No placeholder name registered for anonymous $$$
-        assert!(!placeholders.contains_key(""));
-        let rep = reps.get(text.as_str()).unwrap();
+        assert!(!ps.placeholders.contains_key(""));
+        let rep = ps.repetitions.get(ps.pattern_text.as_str()).unwrap();
         assert_eq!(rep.kind, RepetitionKind::MultiChild);
     }
 
@@ -1540,15 +1413,15 @@ class A {
 
     #[test]
     fn test_body_preprocess() {
-        let (text, placeholders, reps, specials) = preprocess_snippet("$BODY");
-        assert!(text.starts_with("_pw_body_"), "got: {}", text);
+        let ps = preprocess_snippet("$BODY");
+        assert!(ps.pattern_text.starts_with("_pw_body_"), "got: {}", ps.pattern_text);
         // $BODY appends semicolon for valid statement parsing
-        let sentinel = text.trim_end_matches(';');
-        assert_eq!(placeholders.get("BODY").map(|s| s.as_str()), Some(sentinel));
-        let rep = reps.get(sentinel).unwrap();
+        let sentinel = ps.pattern_text.trim_end_matches(';');
+        assert_eq!(ps.placeholders.get("BODY").map(|s| s.as_str()), Some(sentinel));
+        let rep = ps.repetitions.get(sentinel).unwrap();
         assert_eq!(rep.kind, RepetitionKind::MultiChild);
         assert_eq!(rep.op, "*");
-        assert_eq!(specials.get(sentinel), Some(&SpecialKind::Body));
+        assert_eq!(ps.specials.get(sentinel), Some(&SpecialKind::Body));
     }
 
     #[test]
@@ -1576,11 +1449,11 @@ class A {
 
     #[test]
     fn test_stmt_preprocess() {
-        let (text, placeholders, _, specials) = preprocess_snippet("$STMT");
-        assert!(text.starts_with("_pw_stmt_"), "got: {}", text);
-        let sentinel = text.trim_end_matches(';');
-        assert_eq!(placeholders.get("STMT").map(|s| s.as_str()), Some(sentinel));
-        assert_eq!(specials.get(sentinel), Some(&SpecialKind::Stmt));
+        let ps = preprocess_snippet("$STMT");
+        assert!(ps.pattern_text.starts_with("_pw_stmt_"), "got: {}", ps.pattern_text);
+        let sentinel = ps.pattern_text.trim_end_matches(';');
+        assert_eq!(ps.placeholders.get("STMT").map(|s| s.as_str()), Some(sentinel));
+        assert_eq!(ps.specials.get(sentinel), Some(&SpecialKind::Stmt));
     }
 
     #[test]
@@ -1595,10 +1468,10 @@ class A {
 
     #[test]
     fn test_expr_preprocess() {
-        let (text, placeholders, _, specials) = preprocess_snippet("$EXPR");
-        assert!(text.starts_with("_pw_expr_"), "got: {}", text);
-        assert_eq!(placeholders.get("EXPR").map(|s| s.as_str()), Some(text.as_str()));
-        assert_eq!(specials.get(text.as_str()), Some(&SpecialKind::Expr));
+        let ps = preprocess_snippet("$EXPR");
+        assert!(ps.pattern_text.starts_with("_pw_expr_"), "got: {}", ps.pattern_text);
+        assert_eq!(ps.placeholders.get("EXPR").map(|s| s.as_str()), Some(ps.pattern_text.as_str()));
+        assert_eq!(ps.specials.get(ps.pattern_text.as_str()), Some(&SpecialKind::Expr));
     }
 
     #[test]
