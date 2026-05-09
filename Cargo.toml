@@ -1,6 +1,6 @@
 [package]
 name = "patchwork-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "AST-native sed — find, replace, delete, and insert code by structure, not regex"
 repository = "https://github.com/ThatXliner/patchwork"
