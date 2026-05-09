@@ -1,0 +1,95 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Fabric textures -->
+    <pattern id="weave" width="8" height="8" patternUnits="userSpaceOnUse">
+      <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(0,0,0,0.07)" stroke-width="1"/>
+    </pattern>
+    <pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse">
+      <circle cx="7" cy="7" r="1.5" fill="rgba(0,0,0,0.09)"/>
+    </pattern>
+    <pattern id="diagonal" width="16" height="16" patternUnits="userSpaceOnUse">
+      <line x1="0" y1="0" x2="16" y2="16" stroke="rgba(0,0,0,0.06)" stroke-width="1.5"/>
+    </pattern>
+    <pattern id="hounds" width="20" height="20" patternUnits="userSpaceOnUse">
+      <line x1="10" y1="0" x2="10" y2="20" stroke="rgba(0,0,0,0.05)" stroke-width="1"/>
+    </pattern>
+
+    <!-- Drop shadow -->
+    <filter id="shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#1a1a2e" flood-opacity="0.15"/>
+    </filter>
+
+    <!-- Subtle inner shadow for fabric depth at seams -->
+    <filter id="seam-shadow">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3" result="blur"/>
+      <feOffset dx="0" dy="0" result="offsetBlur"/>
+      <feComposite in="SourceGraphic" in2="offsetBlur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Background quilt block -->
+  <g filter="url(#shadow)">
+    <!-- Patch 1: Top-Left — Slate Blue -->
+    <rect x="32" y="32" width="224" height="224" fill="#4A6FA5"/>
+    <rect x="32" y="32" width="224" height="224" fill="url(#weave)"/>
+
+    <!-- Patch 2: Top-Right — Terracotta -->
+    <rect x="256" y="32" width="224" height="224" fill="#D68C5C"/>
+    <rect x="256" y="32" width="224" height="224" fill="url(#dots)"/>
+
+    <!-- Patch 3: Bottom-Left — Warm Cream -->
+    <rect x="32" y="256" width="224" height="224" fill="#E8D5A3"/>
+    <rect x="32" y="256" width="224" height="224" fill="url(#diagonal)"/>
+
+    <!-- Patch 4: Bottom-Right — Sage Green -->
+    <rect x="256" y="256" width="224" height="224" fill="#6B9080"/>
+    <rect x="256" y="256" width="224" height="224" fill="url(#hounds)"/>
+
+    <!-- Seam fold shadows (inner edges where patches meet) -->
+    <line x1="256" y1="32" x2="256" y2="480" stroke="rgba(0,0,0,0.12)" stroke-width="3"/>
+    <line x1="32" y1="256" x2="480" y2="256" stroke="rgba(0,0,0,0.12)" stroke-width="3"/>
+
+    <!-- { } Bracket motif on Patch 1 (Slate Blue) -->
+    <g stroke="rgba(255,255,255,0.35)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <!-- { left bracket -->
+      <path d="M 118 106
+               Q 108 106, 102 116
+               L 102 128
+               Q 102 138, 108 144
+               Q 102 150, 102 160
+               L 102 172
+               Q 108 182, 118 182"/>
+      <!-- } right bracket -->
+      <path d="M 170 106
+               Q 180 106, 186 116
+               L 186 128
+               Q 186 138, 180 144
+               Q 186 150, 186 160
+               L 186 172
+               Q 180 182, 170 182"/>
+    </g>
+
+    <!-- Stitching: vertical center seam -->
+    <line x1="256" y1="32" x2="256" y2="480"
+          stroke="#3D3028" stroke-width="2.5"
+          stroke-dasharray="10 7" stroke-linecap="round"/>
+
+    <!-- Stitching: horizontal center seam -->
+    <line x1="32" y1="256" x2="480" y2="256"
+          stroke="#3D3028" stroke-width="2.5"
+          stroke-dasharray="10 7" stroke-linecap="round"/>
+
+    <!-- Stitching: outer border -->
+    <rect x="32" y="32" width="448" height="448"
+          fill="none" stroke="#3D3028" stroke-width="2.5"
+          stroke-dasharray="10 7" stroke-linecap="round"/>
+
+    <!-- Corner stitch accents (small diagonal stitches at inner corners) -->
+    <g stroke="#3D3028" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 5">
+      <line x1="244" y1="244" x2="256" y2="256"/>
+      <line x1="268" y1="244" x2="256" y2="256"/>
+      <line x1="244" y1="268" x2="256" y2="256"/>
+      <line x1="268" y1="268" x2="256" y2="256"/>
+    </g>
+  </g>
+</svg>

@@ -1,5 +1,7 @@
 # patchwork
 
+<img src="assets/logo.svg" alt="patchwork logo" width="100" align="right">
+
 **AST-native sed — find, replace, delete, and insert code by structure, not regex.**
 
 ## Installation
